@@ -20,6 +20,8 @@ import pytest
 
 from agents.ebpf.target_resolver import DockerTargetResolver
 from agents.ebpf.observer_client import ObserverClient, _DEFAULT_BIN
+from agents.ebpf.package_index import build_index
+from agents.ebpf.reachability import correlate_opens, POTENTIALLY_REACHABLE
 
 _LINUX = platform.system() == "Linux"
 _ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -113,3 +115,49 @@ def test_openat_capture(two_containers):
         f"target open {tpath} not captured"
     assert not any(e["cgroup_id"] == rc.cgroup_id for e in events), "control cgroup leaked events"
     assert not any(cpath in e["filename"] for e in opens), "control probe path leaked"
+
+
+_P2_IMAGE = os.environ.get("VULNREACH_P2_FIXTURE", "vulnreach-p2-fixture")
+
+
+@pytest.fixture()
+def py_app_container():
+    name = f"vr_p2_{uuid.uuid4().hex[:8]}"
+    _run("docker", "run", "-d", "--name", name, _P2_IMAGE, "sleep", "600")
+    try:
+        yield name
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_package_reach_r1(py_app_container):
+    """P2 MVP: openat under a package prefix ⇒ POTENTIALLY_REACHABLE (Rule R1).
+
+    Import only `requests`; assert it (and its deps) are reached, while the
+    installed-but-never-imported `tabulate` is not.
+    """
+    resolver = DockerTargetResolver()
+    rt = resolver.resolve(py_app_container)
+
+    index = build_index(f"/proc/{rt.init_pid}/root", ecosystems=("python",))
+    names = {e.name for e in index.entries()}
+    assert {"requests", "tabulate"} <= names, f"index missing fixtures: {sorted(names)[:20]}"
+
+    async def drive():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=6)
+        try:
+            await asyncio.sleep(1.0)
+            _run("docker", "exec", py_app_container, "python", "-c", "import requests")
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    events = asyncio.run(drive())
+    reach = correlate_opens(events, index)
+    reached = {pr.name for pr in reach.values()}
+
+    assert "requests" in reached, f"requests not reached; got {sorted(reached)}"
+    assert reach["python:requests"].verdict == POTENTIALLY_REACHABLE
+    assert reach["python:requests"].hit_count > 0
+    assert "tabulate" not in reached, "tabulate was never imported but shows reached"
