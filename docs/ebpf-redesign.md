@@ -148,6 +148,38 @@ redis-py↔6379, requests/urllib3↔outbound 80/443). Deterministic rule table f
 only** to judge an unusual/ambiguous egress against the package's expected behavior. R3 corroborates
 but does not by itself prove the vulnerable code path ran.
 
+### 5.4b Rule R5 — interpreted code executed *(implemented, P8 — Tier B)*
+A uprobe on CPython's `_PyEval_EvalFrameDefault` reports which *source file* the
+interpreter actually evaluated a frame from. This is what gets a **pure-interpreted**
+package to CONFIRMED on its own runtime evidence instead of borrowing it from R4.
+
+Two findings changed the plan from what §8/P8 originally assumed:
+
+1. **USDT is unavailable on the images we scan.** Stock `python:*-slim` is not built
+   `--with-dtrace` — `readelf -n` reports **0 `stapsdt` notes**. The
+   `python:line` / `hotspot:method__entry` probes `probe_router.py` was written
+   against simply do not exist there. `_PyEval_EvalFrameDefault` *is* exported in
+   `.dynsym`, so a uprobe attaches with no debug symbols and no rebuild. Reviving
+   `probe_router.py` as-is would have produced nothing.
+2. **"A frame executed" is not much stricter than "a file was opened."** Importing a
+   package runs its module bodies, class bodies and decorators, so R5 fired for every
+   *imported* package and would have marked them all CONFIRMED — collapsing the LIKELY
+   tier and over-claiming reachability. Filtering module-body frames (`co_name ==
+   "<module>"`) is not sufficient either, since class bodies and decorator calls
+   remain.
+
+   The rule that does hold: **code that runs after the app is serving traffic** is
+   request-handling, not startup. `TrafficWindow.mark()` records that boundary
+   (CLOCK_MONOTONIC, directly comparable to `bpf_ktime_get_ns`); pre-boundary frames
+   degrade to R1. On `labs/python_vuln_app` this separates the 10 packages that
+   execute per request from the 6 that merely load at boot.
+
+Implementation notes: struct offsets are version-keyed and pushed into a BPF map at
+attach (the frame arg changed type in 3.11, moved in 3.12, and `PyASCIIObject` shrank
+in 3.12), so one program covers 3.8–3.13. The probe fires on every Python call, so the
+kernel side dedupes by `co_filename` pointer; an epoch in the dedupe key (bumped over
+the observer's stdin at `mark`) lets a file be reported once more during traffic.
+
 ### 5.5 Rule R4 — static-taint cross-reference *(implemented, P7)*
 If static taint says `app_fn F → package P` **and** Tier A observed P loaded (R1), elevate P to
 `CONFIRMED`. This is how a coarse syscall signal borrows precision from static analysis: the
@@ -181,8 +213,8 @@ indistinguishable downstream from coverage-derived findings.
 
 | Evidence | Rule | Verdict | Confidence | Phase |
 |----------|------|---------|-----------|-------|
-| Native `.so` mapped PROT_EXEC **+** static taint path reaches it | R2+R4 | **CONFIRMED** | 0.95 | **P7 (done)** |
-| Language uprobe/USDT: package function entry observed (Tier B) | — | **CONFIRMED** | 0.95 | P8 |
+| Code executed during traffic **+** static taint path reaches it | R2/R5+R4 | **CONFIRMED** | 0.95 | **P7/P8 (done)** |
+| Interpreter evaluated a frame from the package while serving traffic | R5 | **CONFIRMED** | 0.85 | **P8 (done)** |
 | Package file loaded **+** static taint path reaches it | R1+R4 | **CONFIRMED** | 0.9 | **P7 (done)** |
 | Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED** | 0.8 | **P4 (done)** |
 | Package file loaded (import-level), no call evidence | R1 | **LIKELY** | 0.65 | **P5 (done)** |
@@ -194,6 +226,10 @@ Key rule (unchanged in substance): **a pure-interpreted package cannot reach `CO
 alone** — the syscall layer proves it was *loaded* (→ `LIKELY`), not that a specific function *ran*.
 `CONFIRMED` requires R2-native (P4), Tier B enrichment (P8), or R4 static cross-ref (P7). Implemented
 in `agents/ebpf/verdict_integration.py:to_reachability_findings`.
+
+Note the asymmetry that survives P8: R5 raises a package to CONFIRMED only when its code ran **while
+the app was serving traffic**. A package that is imported at startup and never touched again stays
+`LIKELY`, which is the honest reading of the evidence.
 
 ---
 
@@ -233,7 +269,7 @@ LLM**. Enrichment (Phase 8) is where the old rich logic returns.
 | **P5 — Verdict integration** | New enum, mapping table (§6), wire into `correlate_coverage`; legacy-alias shim. | Unit-test each evidence combo → expected verdict/confidence; dashboard consumes without breaking. |
 | **P6 — `net_connect`/`net_io` + Rule R3** | Behavioral corroboration with deterministic port/protocol table. | Container making a DB connect; assert R3 corroborates the driver package only when loaded. |
 | **P7 — Static-taint cross-ref (R4)** ✅ | `taint_modules()` + canonical `dynamic_reachability_verdict()` in `verdict_integration.py`; `taint_flows` threaded from `ScanContext`. | `test_taint_crossref_r4_confirmed` (LIKELY→CONFIRMED 0.9 with taint), `test_taint_only_is_possible`; full-scan e2e on `labs/python_vuln_app` with real `findings.json` flows. |
-| **P8 — Tier B enrichment (rich logic returns)** | cgroup-scoped USDT/uprobe via refactored `probe_router.py`; best-effort attach; elevates verdicts; **baseline unaffected if it fails**. | Kill enrichment mid-run → assert Tier A verdict unchanged; enable on `--with-dtrace` Python → assert elevation to CONFIRMED via call-level hit. |
+| **P8 — Tier B enrichment (Rule R5)** ✅ | cgroup-scoped **uprobe** on `_PyEval_EvalFrameDefault` (not USDT — see §5.4b), version-keyed offsets, in-kernel dedupe + traffic epoch; best-effort attach; **baseline unaffected if it fails**. | `test_interpreted_exec_r5_confirmed` (A/B: same workload is LIKELY without Tier B, CONFIRMED with it), `test_tier_b_failure_preserves_baseline` (bogus lib → observer still ready, Tier A intact), `test_r5_traffic_boundary_separates_import_from_use` (import-only stays LIKELY). |
 | **P9 — containerd/CRI resolver + node DaemonSet** (if D2 says in-scope) | Second `TargetResolver` impl; DaemonSet lifecycle. | K8s kind cluster: DaemonSet attaches to a scanned pod, same programs, same output. |
 
 Sequencing note: **P1→P2 is the MVP** — a language-agnostic baseline that already beats today's

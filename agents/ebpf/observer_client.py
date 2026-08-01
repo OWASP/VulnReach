@@ -34,8 +34,13 @@ class ObserverClient:
         self._proc: Optional[asyncio.subprocess.Process] = None
 
     async def start(self, cgroup_ids: list[int], duration: int = 0,
-                    ready_timeout: float = 10.0) -> dict[str, Any]:
+                    ready_timeout: float = 10.0,
+                    python_lib: Optional[str] = None) -> dict[str, Any]:
         """Spawn the observer and return the parsed ``ready`` line.
+
+        ``python_lib`` enables Tier B enrichment (the CPython uprobe, Rule R5).
+        It is best-effort: an unusable path makes the observer emit a ``warn``
+        and carry on with the Tier A baseline, never an ``error``.
 
         Raises ObserverError if the binary emits an ``error`` line, dies before
         ``ready``, or does not become ready within ``ready_timeout`` seconds.
@@ -48,15 +53,30 @@ class ObserverClient:
             args += ["--cgroup-id", str(cid)]
         if duration:
             args += ["--duration", str(duration)]
+        if python_lib:
+            args += ["--python-lib", python_lib]
 
         self._proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.PIPE,   # control channel (see `mark`)
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
+        # `warn` lines legitimately precede `ready` — a best-effort probe that
+        # failed to attach (e.g. openat2 on an old kernel, or Tier B) reports it
+        # and the observer carries on. Consume them until ready/error.
+        warnings: list[str] = []
+
+        async def _await_ready() -> Optional[dict]:
+            while True:
+                line = await self._read_json()
+                if line is None or line.get("type") != "warn":
+                    return line
+                warnings.append(str(line.get("msg", "")))
+
         try:
-            line = await asyncio.wait_for(self._read_json(), timeout=ready_timeout)
+            line = await asyncio.wait_for(_await_ready(), timeout=ready_timeout)
         except asyncio.TimeoutError:
             await self.stop()
             raise ObserverError("observer did not emit 'ready' within timeout")
@@ -68,7 +88,22 @@ class ObserverClient:
             raise ObserverError(f"observer error: {line.get('msg')}")
         if line.get("type") != "ready":
             raise ObserverError(f"expected 'ready', got: {line}")
+        line["warnings"] = warnings
         return line
+
+    def mark(self) -> None:
+        """Tell the observer that real traffic is starting.
+
+        Bumps the Tier B dedupe epoch so files already reported during startup
+        can be reported once more while handling requests — without it, the
+        per-file dedupe hides exactly the frames Rule R5 cares about.
+        Best-effort and non-blocking; a dead observer is not an error here.
+        """
+        if self._proc and self._proc.stdin and not self._proc.stdin.is_closing():
+            try:
+                self._proc.stdin.write(b"mark\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     async def events(self):
         """Async-iterate parsed event dicts until the stream ends or summary."""
@@ -83,6 +118,8 @@ class ObserverClient:
                 return
             if t == "error":
                 raise ObserverError(f"observer error mid-stream: {line.get('msg')}")
+            if t in ("warn", "marked"):
+                continue  # control lines, not events
             yield line
 
     async def collect(self) -> list[dict[str, Any]]:

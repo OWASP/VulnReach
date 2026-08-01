@@ -6,7 +6,8 @@ product's canonical Verdict vocabulary (D6: reuse CONFIRMED/LIKELY/POSSIBLE/
 NOT_OBSERVED — no parallel enum).
 
 Verdict mapping (D5):
-  R2+R4 native code ran AND a static taint path reaches it → CONFIRMED (0.95)
+  R2/R5+R4 code ran AND a static taint path reaches it    → CONFIRMED (0.95)
+  R5 interpreter evaluated a frame from the package       → CONFIRMED (0.85)
   R2 native code mapped PROT_EXEC (compiled code running) → CONFIRMED (0.8)
   R4 package loaded + static taint flow reaches it        → CONFIRMED (0.9)
   R1 openat load (package files loaded, no call proof)    → LIKELY  (import-hit)
@@ -36,7 +37,8 @@ from agents.ebpf.reachability import PackageReach, CONFIRMED_REACHABLE
 
 # Confidence values kept identical to coverage_correlator for consistency.
 _CONF_NATIVE_EXEC = 0.8   # R2: native code mapped PROT_EXEC (redesign §6)
-_CONF_NATIVE_EXEC_TAINTED = 0.95  # R2 + R4: native code ran AND a taint path reaches it
+_CONF_INTERPRETED_EXEC = 0.85  # R5: interpreter evaluated a frame from the package
+_CONF_EXEC_TAINTED = 0.95  # R2/R5 + R4: code ran AND a taint path reaches it
 _CONF_TAINT_CONFIRMED = 0.9  # R4: runtime load + static taint path
 _CONF_IMPORT_HIT = 0.65
 _CONF_TAINT_ONLY = 0.4    # taint path exists but package never loaded
@@ -106,14 +108,21 @@ def to_reachability_findings(
 
         loaded = pr is not None
         has_taint = _norm(import_name) in tainted or _norm(pypi) in tainted
-        # R2: native code mapped executable is proof of execution on its own.
-        native_exec = loaded and pr.verdict == CONFIRMED_REACHABLE
+        # Runtime proof of execution: R2 (native code mapped executable) or
+        # R5 (interpreter evaluated a frame from the package's source).
+        executed = loaded and pr.verdict == CONFIRMED_REACHABLE
 
-        if native_exec:
-            # Both proofs (native code ran AND a static path reaches it) is the
-            # strongest evidence we can produce from Tier A.
+        if executed:
+            # Execution proof AND a static path reaching it is the strongest
+            # evidence we can produce.
             verdict = "CONFIRMED"
-            confidence = _CONF_NATIVE_EXEC_TAINTED if has_taint else _CONF_NATIVE_EXEC
+            if has_taint:
+                confidence = _CONF_EXEC_TAINTED
+            elif "R5" in pr.rule:
+                # A frame actually ran — stricter than "was mapped executable".
+                confidence = _CONF_INTERPRETED_EXEC
+            else:
+                confidence = _CONF_NATIVE_EXEC
         else:
             # Canonical rule: taint path + runtime evidence ⇒ CONFIRMED (R4);
             # runtime only ⇒ LIKELY (R1); taint only ⇒ POSSIBLE; neither ⇒ NOT_OBSERVED.
@@ -125,7 +134,7 @@ def to_reachability_findings(
                 cve_id=cve,
                 package=vuln.get("package"),
                 import_detected=loaded,
-                call_chain_exists=native_exec or (has_taint and loaded),
+                call_chain_exists=executed or (has_taint and loaded),
                 sink_reachable=has_taint and loaded,
                 import_time_hit=loaded and verdict == "LIKELY",
                 verdict=verdict,

@@ -10,11 +10,13 @@ runtime evidence. They are NOT the product's verdict enum (D6): the boundary in
 ``Verdict`` (CONFIRMED/LIKELY/POSSIBLE/NOT_OBSERVED) that risk scoring, policy,
 storage and the dashboard consume — R1 load-level ⇒ LIKELY (D5).
 
-  CONFIRMED_REACHABLE    package code demonstrably executed (R2 native / Tier B / R4)
+  CONFIRMED_REACHABLE    package code demonstrably executed (R2 native / R5 Tier B)
   POTENTIALLY_REACHABLE  package files loaded, no proof a function ran (R1)
   NOT_OBSERVED           package present but never seen during the window
 
-P2 implements R1 only → POTENTIALLY_REACHABLE. R2/R3/R4 land in P4/P6/P7.
+Rules implemented here: R1 (open ⇒ loaded), R2 (native .so mapped PROT_EXEC),
+R5 (CPython uprobe ⇒ a frame from this source file was evaluated). R3 (network
+behavior) is P6; R4 (static-taint cross-ref) lives in verdict_integration.
 """
 from __future__ import annotations
 
@@ -44,7 +46,8 @@ class PackageReach:
 
 
 def correlate_opens(events: list[dict], index: PackageIndex,
-                    max_evidence: int = 5) -> dict[str, PackageReach]:
+                    max_evidence: int = 5,
+                    traffic_start_ns: int | None = None) -> dict[str, PackageReach]:
     """Correlate observer events to per-package reachability.
 
     Rule R1 — an ``open`` under a package prefix ⇒ package loaded
@@ -105,6 +108,39 @@ def correlate_opens(events: list[dict], index: PackageIndex,
         pr = _touch(entry, path, CONFIRMED_REACHABLE, "R2")
         pr.verdict = CONFIRMED_REACHABLE  # upgrade if it was R1
         pr.rule = "R2"
+        pr.hit_count += 1
+
+    # Pass 3 — R5 (Tier B): the interpreter actually evaluated a frame from this
+    # source file. This is the only evidence that gets a *pure-interpreted*
+    # package to CONFIRMED on its own runtime proof rather than borrowing it from
+    # the static tainter (R4).
+    #
+    # `traffic_start_ns` is what makes R5 stricter than R1. Importing a package
+    # runs plenty of its own code — module bodies, class bodies, decorators — so
+    # "a frame executed" on its own is barely better than "a file was opened".
+    # Frames observed *after* the app is serving traffic are different: that code
+    # ran to handle a request. Boot-time frames are downgraded to load-level
+    # evidence (R1), mirroring the product's existing import_time_hit semantics.
+    # Both clocks are CLOCK_MONOTONIC (bpf_ktime_get_ns / time.monotonic_ns), so
+    # the timestamps compare directly. None => no boot/traffic split available.
+    for ev in events:
+        if ev.get("type") != "py_call":
+            continue
+        path = ev.get("filename") or ""
+        if not path.startswith("/"):
+            continue  # "<frozen importlib._bootstrap>", "<string>", etc.
+        entry = index.match(path)
+        if entry is None:
+            continue
+        if traffic_start_ns is not None and (ev.get("ts_ns") or 0) < traffic_start_ns:
+            # Ran only while booting — the package is loaded, not exercised.
+            pr = _touch(entry, path, POTENTIALLY_REACHABLE, "R1")
+            pr.hit_count += 1
+            continue
+        pr = _touch(entry, path, CONFIRMED_REACHABLE, "R5")
+        pr.verdict = CONFIRMED_REACHABLE
+        # Keep both when a package has native *and* interpreted execution.
+        pr.rule = "R2+R5" if pr.rule in ("R2", "R2+R5") else "R5"
         pr.hit_count += 1
 
     return reached

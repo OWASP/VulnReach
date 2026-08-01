@@ -5,11 +5,14 @@ Not part of the auto pytest suite (heavy: builds the target image, needs host
 networking + docker socket). Run it inside the scan-runner container — see
 agents/ebpf/observer/README.md "Full-scan e2e".
 
-Validated result (2026-08-01, Docker Desktop 6.12, R2+R4 active):
-  CONFIRMED 0.9 : Flask, requests           (R1 load + R4 taint path)
-  CONFIRMED 0.8 : PyYAML                    (R2 — _yaml C ext mapped PROT_EXEC)
-  LIKELY    0.65: Jinja2, Werkzeug, urllib3 (loaded, no taint path)
+Validated result (2026-08-01, Docker Desktop 6.12, R2+R4+R5 active):
+  CONFIRMED 0.95: Flask, requests, PyYAML   (executed during traffic + taint path)
+  CONFIRMED 0.85: Jinja2, Werkzeug, urllib3 (executed during traffic, no taint path)
   NOT_OBSERVED  : lxml, cryptography, SQLAlchemy, PyJWT, Pillow (never loaded)
+
+Of the 16 packages the Package-Index sees loaded, only 10 execute while serving
+traffic — certifi/idna/click/itsdangerous load at boot and are never exercised.
+That boot-vs-traffic split is Rule R5 (see TrafficWindow).
 """
 import asyncio
 import json

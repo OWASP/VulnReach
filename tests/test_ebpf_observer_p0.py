@@ -25,7 +25,9 @@ from agents.ebpf.reachability import (
     correlate_opens, POTENTIALLY_REACHABLE, CONFIRMED_REACHABLE,
 )
 from agents.ebpf.verdict_integration import to_reachability_findings
-from agents.ebpf.observer_runner import run_observer_reachability, observer_available
+from agents.ebpf.observer_runner import (
+    run_observer_reachability, observer_available, find_libpython, TrafficWindow,
+)
 
 _LINUX = platform.system() == "Linux"
 _ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -317,19 +319,175 @@ def test_observer_runner_end_to_end(py_app_container):
     ok, reason = observer_available()
     assert ok, f"observer not available: {reason}"
 
+    # Mirrors _run_observer_mode: mark the boundary once the target is "healthy",
+    # then drive real calls into the package.
+    window = TrafficWindow()
+
+    # Must not block the event loop: the collector drains the observer's stdout
+    # concurrently, and a blocking subprocess.run here lets the pipe fill and
+    # truncate the tail of the event stream. Production traffic
+    # (_run_schemathesis) is async for the same reason.
+    async def _exec(*cmd: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", py_app_container, *cmd,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        await proc.wait()
+
     async def traffic():
-        _run("docker", "exec", py_app_container, "python", "-c", "import requests")
+        await _exec("python", "-c", "import requests")
+        window.mark()
+        await asyncio.sleep(0.3)
+        await _exec("python", "-c", "import requests; requests.utils.default_headers()")
+        await asyncio.sleep(0.5)  # let the tail of the stream drain
 
     vulns = [
         {"package": "requests", "cve_id": ["CVE-TEST-REQ"], "severity": "HIGH"},
         {"package": "tabulate", "cve_id": ["CVE-TEST-TAB"], "severity": "HIGH"},
     ]
     findings, meta = asyncio.run(run_observer_reachability(
-        py_app_container, vulns, ecosystems=("python",), duration=6, traffic=traffic,
+        py_app_container, vulns, ecosystems=("python",), duration=10,
+        traffic=traffic, window=window,
     ))
     by_pkg = {f.package: f for f in findings}
-    assert by_pkg["requests"].verdict == "LIKELY"
+    # The runner auto-discovers libpython, so Tier B is on and `requests` is
+    # CONFIRMED by execution during traffic (R5), not merely loaded (R1).
+    assert by_pkg["requests"].verdict == "CONFIRMED"
     assert by_pkg["tabulate"].verdict == "NOT_OBSERVED"
     assert meta["engine"] == "observer"
     assert meta["open_events"] > 0
     assert "requests" in meta["reached"]
+    assert meta["tier_b"]["enabled"] is True
+    assert meta["py_call_events"] > 0
+    assert "requests" in meta["code_executed"]
+
+
+def _drive(cgroup_id: int, cmd: list[str], container: str, python_lib=None, secs=8):
+    """Observe `container` for `secs` while running `cmd` inside it."""
+    async def go():
+        client = ObserverClient(_BIN)
+        ready = await client.start([cgroup_id], duration=secs, python_lib=python_lib)
+        try:
+            await asyncio.sleep(1.0)  # let the probes settle
+            _run("docker", "exec", container, *cmd)
+            return ready, await client.collect()
+        finally:
+            await client.stop()
+    return asyncio.run(go())
+
+
+def test_interpreted_exec_r5_confirmed(py_app_container):
+    """P8/Rule R5: the CPython uprobe lifts a pure-Python package to CONFIRMED.
+
+    A/B against the same workload: Tier A alone can only prove `requests` was
+    *loaded* (LIKELY). With Tier B attached we see the interpreter evaluate
+    frames from its source, which is execution proof (CONFIRMED).
+    """
+    rt = DockerTargetResolver().resolve(py_app_container)
+    root = f"/proc/{rt.init_pid}/root"
+    index = build_index(root, ecosystems=("python",))
+
+    lib = find_libpython(root)
+    assert lib is not None, "no libpython found in the fixture image"
+
+    imp = ["python", "-c", "import requests; requests.utils.default_headers()"]
+
+    # A — Tier A only.
+    _, base_events = _drive(rt.cgroup_id, imp, py_app_container)
+    assert not any(e["type"] == "py_call" for e in base_events)
+    base = correlate_opens(base_events, index)
+    assert base["python:requests"].verdict == POTENTIALLY_REACHABLE
+
+    # B — Tier B attached.
+    ready, events = _drive(rt.cgroup_id, imp, py_app_container, python_lib=lib)
+    assert "uprobe:py_eval_frame" in ready["progs"], f"tier B did not attach: {ready}"
+    assert any(e["type"] == "py_call" for e in events), "no py_call events captured"
+
+    reach = correlate_opens(events, index)
+    req = reach.get("python:requests")
+    assert req is not None, f"requests not reached: {sorted(reach)}"
+    assert req.verdict == CONFIRMED_REACHABLE, f"expected R5 CONFIRMED, got {req.verdict}/{req.rule}"
+    assert "R5" in req.rule
+
+    vulns = [{"package": "requests", "cve_id": ["CVE-T-REQ"], "severity": "HIGH"},
+             {"package": "tabulate", "cve_id": ["CVE-T-TAB"], "severity": "HIGH"}]
+    by_pkg = {f.package: f for f in to_reachability_findings(reach, vulns)}
+    assert by_pkg["requests"].verdict == "CONFIRMED"
+    assert by_pkg["requests"].confidence == 0.85
+    assert by_pkg["requests"].call_chain_exists is True
+    # Never imported ⇒ Tier B must not invent evidence for it.
+    assert by_pkg["tabulate"].verdict == "NOT_OBSERVED"
+
+
+def test_tier_b_failure_preserves_baseline(py_app_container):
+    """The redesign's hard constraint: Tier B may only ever add signal.
+
+    Point the uprobe at an unusable path — the observer must still come up and
+    deliver the full Tier A baseline rather than failing the scan.
+    """
+    rt = DockerTargetResolver().resolve(py_app_container)
+    index = build_index(f"/proc/{rt.init_pid}/root", ecosystems=("python",))
+
+    ready, events = _drive(rt.cgroup_id, ["python", "-c", "import requests"],
+                           py_app_container, python_lib="/nonexistent/libpython3.9.so")
+    assert "uprobe:py_eval_frame" not in ready["progs"]
+    assert not any(e["type"] == "py_call" for e in events)
+
+    # Baseline intact.
+    reach = correlate_opens(events, index)
+    assert reach["python:requests"].verdict == POTENTIALLY_REACHABLE
+    vulns = [{"package": "requests", "cve_id": ["CVE-T-REQ"], "severity": "HIGH"}]
+    assert to_reachability_findings(reach, vulns)[0].verdict == "LIKELY"
+
+
+def test_r5_traffic_boundary_separates_import_from_use(py_app_container):
+    """R5's precision rule: importing a package is not using it.
+
+    Importing runs plenty of a package's own code (module bodies, class bodies,
+    decorators), so "a frame executed" alone is barely stricter than R1. The
+    boot→traffic boundary is what makes R5 mean *this ran to serve a request*.
+    Here `tabulate` is only imported; `requests` is imported and then called.
+    """
+    rt = DockerTargetResolver().resolve(py_app_container)
+    root = f"/proc/{rt.init_pid}/root"
+    index = build_index(root, ecosystems=("python",))
+    lib = find_libpython(root)
+    window = TrafficWindow()
+
+    async def go():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=10, python_lib=lib)
+        # Bumps the in-kernel dedupe epoch on mark, so files already reported
+        # during startup can be reported again while serving traffic.
+        window.attach(client.mark)
+        try:
+            await asyncio.sleep(1.0)
+            # "boot": both packages imported before traffic starts.
+            _run("docker", "exec", py_app_container, "python", "-c",
+                 "import tabulate, requests")
+            await asyncio.sleep(0.5)
+            window.mark()
+            await asyncio.sleep(0.5)
+            # "traffic": only requests is actually called.
+            _run("docker", "exec", py_app_container, "python", "-c",
+                 "import requests; requests.utils.default_headers()")
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    events = asyncio.run(go())
+    reach = correlate_opens(events, index, traffic_start_ns=window.start_ns)
+
+    req = reach.get("python:requests")
+    assert req is not None and req.verdict == CONFIRMED_REACHABLE, \
+        f"requests should be CONFIRMED after being called: {req}"
+    assert "R5" in req.rule
+
+    tab = reach.get("python:tabulate")
+    assert tab is not None, "tabulate should still be seen as loaded"
+    assert tab.verdict == POTENTIALLY_REACHABLE, \
+        f"import-only package must not reach CONFIRMED, got {tab.verdict}/{tab.rule}"
+
+    # Same events without the boundary: tabulate would be indistinguishable.
+    naive = correlate_opens(events, index)
+    assert naive["python:tabulate"].verdict == CONFIRMED_REACHABLE

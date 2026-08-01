@@ -2210,6 +2210,7 @@ class DynamicReachabilityAgent(BaseTool):
         Requires Dockerfile mode + the built observer binary on the host.
         """
         from agents.ebpf.observer_runner import (
+            TrafficWindow,
             observer_available,
             run_observer_reachability,
         )
@@ -2261,9 +2262,15 @@ class DynamicReachabilityAgent(BaseTool):
             # startup import storm (openat fires once, at first import). We fold
             # the health-wait + traffic into the traffic callback so the observer
             # is already recording while the target imports its dependencies.
+            # Health is also the boot→traffic boundary for Rule R5: code the
+            # interpreter runs before this point is import/startup work, code
+            # after it is handling requests.
+            window = TrafficWindow()
+
             async def traffic() -> None:
                 healthy = await self._wait_for_healthy(base_url, timeout=30)
                 if healthy:
+                    window.mark()
                     await self._run_schemathesis(
                         base_url, openapi_path, container_port, workdir=None
                     )
@@ -2280,6 +2287,7 @@ class DynamicReachabilityAgent(BaseTool):
                 taint_flows=context.taint_flows,
                 duration=max(timeout, runtime.coverage_wait),
                 traffic=traffic,
+                window=window,
             )
         finally:
             await self._stop_container(container_id)
