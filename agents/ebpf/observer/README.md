@@ -14,6 +14,12 @@ POTENTIALLY_REACHABLE→`LIKELY`; R2 native `.so` mapped PROT_EXEC ⇒ compiled 
 executing ⇒ CONFIRMED_REACHABLE→`CONFIRMED` (0.8). mmap gives only a basename, so
 R2 joins it to the full path seen in the open stream for package attribution.
 
+R4 (`verdict_integration.py`) cross-references the static tainter: a package that is
+loaded (R1) **and** sits at the end of a taint flow ⇒ `CONFIRMED` (0.9); a taint flow
+to a package that never loaded ⇒ `POSSIBLE` (0.4). R2+R4 together ⇒ 0.95. The verdict
+itself is `correlation.engine.dynamic_reachability_verdict()` — the product's canonical
+rule, not a parallel one.
+
 ## Build (in Docker — everything runs in Linux containers)
 
 ```bash
@@ -86,10 +92,17 @@ docker run --rm --privileged --network host --pid=host --cgroupns=host \
   bash -c 'mount -t tracefs nodev /sys/kernel/tracing 2>/dev/null; python3 /repo/agents/ebpf/observer/e2e/scan_driver.py'
 ```
 
-Validated result (with R2 active): **1 CONFIRMED** (PyYAML — its `_yaml` C extension
-was mapped PROT_EXEC), **5 LIKELY** (Flask, requests, Jinja2, Werkzeug, urllib3 —
-pure-Python loads), **5 NOT_OBSERVED** (lxml, cryptography, SQLAlchemy, PyJWT,
-Pillow — installed but never loaded).
+Validated result (R2 + R4 active, real taint flows from `labs/python_vuln_app/findings.json`):
+
+| Verdict | Conf | Packages | Why |
+|---------|------|----------|-----|
+| CONFIRMED | 0.90 | Flask, requests | loaded (R1) + taint path (R4) |
+| CONFIRMED | 0.80 | PyYAML | `_yaml` C extension mapped PROT_EXEC (R2) |
+| LIKELY | 0.65 | Jinja2, Werkzeug, urllib3 | pure-Python load, no taint path |
+| NOT_OBSERVED | 0.10 | lxml, cryptography, SQLAlchemy, PyJWT, Pillow | installed, never loaded |
+
+(Without taint flows the same run gives 6 LIKELY / 5 NOT_OBSERVED — R4 is what
+separates "this package was imported" from "this package is on a tainted path".)
 
 **Note:** the scan-runner must install `schemathesis==4.11.0` (same pin as
 `requirements.txt`). The agent's `--url`/`--max-examples` are 4.x flags; installing

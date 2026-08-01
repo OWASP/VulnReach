@@ -252,6 +252,65 @@ def test_native_exec_r2_confirmed(py_app_container):
     assert by_pkg["requests"].import_time_hit is True
 
 
+def test_taint_crossref_r4_confirmed(py_app_container):
+    """P7/Rule R4: runtime load + a static taint path ⇒ CONFIRMED.
+
+    This is the route to CONFIRMED for *pure-interpreted* packages, which R2
+    (native code) can never reach. Uses the product's canonical rule
+    (dynamic_reachability_verdict): taint flow + runtime evidence ⇒ CONFIRMED.
+    """
+    resolver = DockerTargetResolver()
+    rt = resolver.resolve(py_app_container)
+    index = build_index(f"/proc/{rt.init_pid}/root", ecosystems=("python",))
+
+    async def drive():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=6)
+        try:
+            await asyncio.sleep(1.0)
+            _run("docker", "exec", py_app_container, "python", "-c", "import requests")
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    reach = correlate_opens(asyncio.run(drive()), index)
+
+    # Tainter-shaped flow: user input reaches requests (pure-Python package).
+    flows = [{
+        "id": "FLOW-TEST",
+        "vulnerability_class": "SSRF",
+        "sink": {"definition": {"module": "requests", "function": "get"}},
+        "source": {"location": {"file": "/app/src/app.py", "line": 10}},
+    }]
+    vulns = [
+        {"package": "requests", "cve_id": ["CVE-T-REQ"], "severity": "HIGH"},
+        {"package": "tabulate", "cve_id": ["CVE-T-TAB"], "severity": "HIGH"},
+    ]
+
+    # Without taint: runtime load only ⇒ LIKELY.
+    no_taint = {f.package: f for f in to_reachability_findings(reach, vulns)}
+    assert no_taint["requests"].verdict == "LIKELY"
+
+    # With taint: loaded + static path ⇒ CONFIRMED (R4).
+    with_taint = {f.package: f
+                  for f in to_reachability_findings(reach, vulns, taint_flows=flows)}
+    req = with_taint["requests"]
+    assert req.verdict == "CONFIRMED", f"R4 did not elevate: {req.verdict}"
+    assert req.sink_reachable is True
+    assert req.confidence == 0.9
+    # Taint path but never loaded stays below CONFIRMED.
+    assert with_taint["tabulate"].verdict == "NOT_OBSERVED"
+
+
+def test_taint_only_is_possible():
+    """A taint path to a package that was never loaded ⇒ POSSIBLE (not CONFIRMED)."""
+    flows = [{"sink": {"definition": {"module": "yaml"}}}]
+    vulns = [{"package": "PyYAML", "cve_id": ["CVE-T-YAML"], "severity": "HIGH"}]
+    out = to_reachability_findings({}, vulns, taint_flows=flows)
+    assert out[0].verdict == "POSSIBLE"
+    assert out[0].import_detected is False
+
+
 def test_observer_runner_end_to_end(py_app_container):
     """Agent-facing entrypoint: run_observer_reachability drives the full path
     (resolve → index → observe+traffic → correlate → canonical findings)."""

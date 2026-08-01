@@ -2277,6 +2277,7 @@ class DynamicReachabilityAgent(BaseTool):
                 container_id,
                 context.vulnerabilities,
                 import_map=context.import_map,
+                taint_flows=context.taint_flows,
                 duration=max(timeout, runtime.coverage_wait),
                 traffic=traffic,
             )

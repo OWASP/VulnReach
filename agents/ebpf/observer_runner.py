@@ -24,7 +24,10 @@ from agents.ebpf.target_resolver import DockerTargetResolver
 from agents.ebpf.observer_client import ObserverClient, _DEFAULT_BIN
 from agents.ebpf.package_index import build_index
 from agents.ebpf.reachability import correlate_opens
-from agents.ebpf.verdict_integration import to_reachability_findings
+from agents.ebpf.verdict_integration import (
+    to_reachability_findings,
+    taint_modules as _taint_modules,
+)
 
 
 def observer_available(binary_path: str = _DEFAULT_BIN) -> tuple[bool, str]:
@@ -48,6 +51,7 @@ async def run_observer_reachability(
     vulnerabilities: list[dict],
     *,
     import_map: Optional[dict[str, str]] = None,
+    taint_flows: Optional[list[dict]] = None,
     ecosystems: tuple[str, ...] = ("python", "node"),
     duration: int = 10,
     binary_path: Optional[str] = None,
@@ -89,7 +93,7 @@ async def run_observer_reachability(
     events = await collector
 
     reach = correlate_opens(events, index)
-    findings = to_reachability_findings(reach, vulnerabilities, import_map)
+    findings = to_reachability_findings(reach, vulnerabilities, import_map, taint_flows)
 
     metadata = {
         "engine": "observer",
@@ -99,5 +103,7 @@ async def run_observer_reachability(
         "open_events": sum(1 for e in events if e.get("type") == "open"),
         "packages_reached": len(reach),
         "reached": sorted({pr.name for pr in reach.values()}),
+        "native_exec": sorted({pr.name for pr in reach.values() if pr.rule == "R2"}),
+        "taint_modules": sorted(_taint_modules(taint_flows)),
     }
     return findings, metadata

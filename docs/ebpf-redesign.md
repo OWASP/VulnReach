@@ -148,11 +148,22 @@ redis-py↔6379, requests/urllib3↔outbound 80/443). Deterministic rule table f
 only** to judge an unusual/ambiguous egress against the package's expected behavior. R3 corroborates
 but does not by itself prove the vulnerable code path ran.
 
-### 5.5 Rule R4 — static-taint cross-reference (existing mechanism, extended)
-Reuse `correlate_coverage`'s existing cross-ref: if static taint says `app_fn F → package P` and
-Tier A shows F's **source file was opened** (P2) or F's process reached the relevant sink behavior
-(P4/P5), elevate P. This is how a coarse syscall signal borrows precision from static analysis —
-and it's already half-built (`static_findings` path in `coverage_correlator.py`).
+### 5.5 Rule R4 — static-taint cross-reference *(implemented, P7)*
+If static taint says `app_fn F → package P` **and** Tier A observed P loaded (R1), elevate P to
+`CONFIRMED`. This is how a coarse syscall signal borrows precision from static analysis: the
+syscall layer proves the package was *there*, the taint graph proves a path *to* it exists.
+
+Implementation (`agents/ebpf/verdict_integration.py`):
+- `taint_modules(taint_flows)` reads `sink.definition.module` from the tainter's flow records and
+  normalises to top-level import names (`yaml.load` → `yaml`).
+- The verdict is **not hand-rolled**: it is exactly
+  `correlation.engine.dynamic_reachability_verdict(has_taint_flow, has_coverage_hit)`, the
+  product's canonical rule. R4/R1/POSSIBLE/NOT_OBSERVED all fall out of that one call.
+- `taint_flows` threads `ScanContext.taint_flows` → `run_observer_reachability` →
+  `to_reachability_findings`.
+
+R2 and R4 compose: native code demonstrably executing **and** a static path reaching it is the
+strongest Tier A evidence available (0.95) and outranks either alone.
 
 ---
 
@@ -170,11 +181,13 @@ indistinguishable downstream from coverage-derived findings.
 
 | Evidence | Rule | Verdict | Confidence | Phase |
 |----------|------|---------|-----------|-------|
+| Native `.so` mapped PROT_EXEC **+** static taint path reaches it | R2+R4 | **CONFIRMED** | 0.95 | **P7 (done)** |
 | Language uprobe/USDT: package function entry observed (Tier B) | — | **CONFIRMED** | 0.95 | P8 |
-| Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED** | 0.8 | P4 |
-| Package file loaded **+** static taint chain's app fn executed | R1+R4 | **CONFIRMED** | 0.9 | P7 |
+| Package file loaded **+** static taint path reaches it | R1+R4 | **CONFIRMED** | 0.9 | **P7 (done)** |
+| Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED** | 0.8 | **P4 (done)** |
 | Package file loaded (import-level), no call evidence | R1 | **LIKELY** | 0.65 | **P5 (done)** |
 | Behavioral corroboration (connect+loaded, protocol match) | R3 | **LIKELY/POSSIBLE** | 0.6 | P6 |
+| Static taint path exists but package never loaded | R4 only | **POSSIBLE** | 0.4 | **P7 (done)** |
 | Package in SBOM, never observed loaded | — | **NOT_OBSERVED** | 0.1 | **P5 (done)** |
 
 Key rule (unchanged in substance): **a pure-interpreted package cannot reach `CONFIRMED` from Tier A
@@ -219,7 +232,7 @@ LLM**. Enrichment (Phase 8) is where the old rich logic returns.
 | **P4 — `lib_load` + Rule R2** | PROT_EXEC/`.so` discrimination → native `package executed` → `CONFIRMED_REACHABLE` for native pkgs. | Trace a container importing a native ext (e.g. lxml); assert R2 fires and pure-Python import does not. |
 | **P5 — Verdict integration** | New enum, mapping table (§6), wire into `correlate_coverage`; legacy-alias shim. | Unit-test each evidence combo → expected verdict/confidence; dashboard consumes without breaking. |
 | **P6 — `net_connect`/`net_io` + Rule R3** | Behavioral corroboration with deterministic port/protocol table. | Container making a DB connect; assert R3 corroborates the driver package only when loaded. |
-| **P7 — Static-taint cross-ref (R4)** | Extend existing `static_findings` path to consume Tier A load/behavior events for elevation. | Fixture: taint chain + P1 file-open of the app fn → assert elevation to CONFIRMED. |
+| **P7 — Static-taint cross-ref (R4)** ✅ | `taint_modules()` + canonical `dynamic_reachability_verdict()` in `verdict_integration.py`; `taint_flows` threaded from `ScanContext`. | `test_taint_crossref_r4_confirmed` (LIKELY→CONFIRMED 0.9 with taint), `test_taint_only_is_possible`; full-scan e2e on `labs/python_vuln_app` with real `findings.json` flows. |
 | **P8 — Tier B enrichment (rich logic returns)** | cgroup-scoped USDT/uprobe via refactored `probe_router.py`; best-effort attach; elevates verdicts; **baseline unaffected if it fails**. | Kill enrichment mid-run → assert Tier A verdict unchanged; enable on `--with-dtrace` Python → assert elevation to CONFIRMED via call-level hit. |
 | **P9 — containerd/CRI resolver + node DaemonSet** (if D2 says in-scope) | Second `TargetResolver` impl; DaemonSet lifecycle. | K8s kind cluster: DaemonSet attaches to a scanned pod, same programs, same output. |
 
