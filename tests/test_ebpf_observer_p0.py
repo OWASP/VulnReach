@@ -23,6 +23,7 @@ from agents.ebpf.observer_client import ObserverClient, _DEFAULT_BIN
 from agents.ebpf.package_index import build_index
 from agents.ebpf.reachability import correlate_opens, POTENTIALLY_REACHABLE
 from agents.ebpf.verdict_integration import to_reachability_findings
+from agents.ebpf.observer_runner import run_observer_reachability, observer_available
 
 _LINUX = platform.system() == "Linux"
 _ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -204,3 +205,27 @@ def test_verdict_integration_r1(py_app_container):
     tab = findings["tabulate"]
     assert tab.verdict == "NOT_OBSERVED"
     assert not tab.import_detected
+
+
+def test_observer_runner_end_to_end(py_app_container):
+    """Agent-facing entrypoint: run_observer_reachability drives the full path
+    (resolve → index → observe+traffic → correlate → canonical findings)."""
+    ok, reason = observer_available()
+    assert ok, f"observer not available: {reason}"
+
+    async def traffic():
+        _run("docker", "exec", py_app_container, "python", "-c", "import requests")
+
+    vulns = [
+        {"package": "requests", "cve_id": ["CVE-TEST-REQ"], "severity": "HIGH"},
+        {"package": "tabulate", "cve_id": ["CVE-TEST-TAB"], "severity": "HIGH"},
+    ]
+    findings, meta = asyncio.run(run_observer_reachability(
+        py_app_container, vulns, ecosystems=("python",), duration=6, traffic=traffic,
+    ))
+    by_pkg = {f.package: f for f in findings}
+    assert by_pkg["requests"].verdict == "LIKELY"
+    assert by_pkg["tabulate"].verdict == "NOT_OBSERVED"
+    assert meta["engine"] == "observer"
+    assert meta["open_events"] > 0
+    assert "requests" in meta["reached"]

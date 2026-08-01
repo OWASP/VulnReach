@@ -291,6 +291,12 @@ class DynamicReachabilityAgent(BaseTool):
                         "bpftrace may need --no-btf. Upgrading to 5.2+ is recommended."
                     )
 
+            # Language-agnostic CO-RE observer engine (P0–P5). Bypasses the
+            # legacy bpftrace/LinuxKit gate — it has its own availability check.
+            if getattr(ebpf_cfg, "engine", "legacy") == "observer":
+                logger.info("[dynamic] eBPF observer engine active (language-agnostic CO-RE)")
+                return await self._run_observer_mode(context, repo_path, runtime, preflight)
+
             if self._ebpf_available(ebpf_cfg.tracer):
                 logger.info(
                     f"[dynamic] eBPF mode active (tracer={ebpf_cfg.tracer}, mode={ebpf_cfg.mode})"
@@ -2187,6 +2193,100 @@ class DynamicReachabilityAgent(BaseTool):
         container_id = stdout.decode("utf-8").strip()
         logger.info(f"[dynamic][ebpf] Started plain container: {container_id[:12]}")
         return container_id
+
+    async def _run_observer_mode(
+        self,
+        context: "ScanContext",
+        repo_path: Path,
+        runtime: Any,
+        preflight: Dict[str, Any],
+    ) -> "AgentResult":
+        """Language-agnostic CO-RE observer flow (P0–P5).
+
+        Builds the plain image, runs it, drives Schemathesis traffic while a
+        host-level cgroup-scoped observer records syscalls, then correlates
+        file-open events to packages (Rule R1) and emits canonical findings.
+
+        Requires Dockerfile mode + the built observer binary on the host.
+        """
+        from agents.ebpf.observer_runner import (
+            observer_available,
+            run_observer_reachability,
+        )
+
+        ebpf_cfg = runtime.ebpf
+        container_port = runtime.container_port
+        timeout = runtime.timeout
+        openapi_path = preflight.get("openapi_path")
+        dockerfile_path = preflight.get("dockerfile_path")
+
+        if not dockerfile_path:
+            return AgentResult(
+                tool_name=self.tool_name, findings=[],
+                metadata={"status": "skipped", "reason": "observer_requires_dockerfile_mode",
+                          "container_started": {"status": "no", "id": "na"}},
+            )
+
+        available, reason = observer_available()
+        if not available:
+            return AgentResult(
+                tool_name=self.tool_name, findings=[],
+                metadata={"status": "skipped", "reason": f"observer_unavailable:{reason}",
+                          "container_started": {"status": "no", "id": "na"}},
+            )
+
+        image_tag, build_meta = await self._build_plain_image(Path(dockerfile_path), repo_path)
+        if not image_tag:
+            return AgentResult(
+                tool_name=self.tool_name, findings=[],
+                metadata={"status": "failed", "step": "observer_image_build",
+                          "container_started": {"status": "no", "id": "na"}, **build_meta},
+            )
+
+        container_id = await self._start_container_plain(image_tag, container_port, timeout)
+        if not container_id:
+            return AgentResult(
+                tool_name=self.tool_name, findings=[],
+                metadata={"status": "failed", "step": "observer_container_start",
+                          "container_started": {"status": "no", "id": "na"}, "image": image_tag},
+            )
+
+        obs_meta: Dict[str, Any] = {}
+        findings: List[Any] = []
+        try:
+            base_url = f"http://{_target_host()}:{container_port}"
+            if not await self._wait_for_healthy(base_url, timeout=30):
+                return AgentResult(
+                    tool_name=self.tool_name, findings=[],
+                    metadata={"status": "failed", "step": "observer_health_check",
+                              "container_started": {"status": "no", "id": container_id[:12]}},
+                )
+
+            async def traffic() -> None:
+                await self._run_schemathesis(base_url, openapi_path, container_port, workdir=None)
+
+            findings, obs_meta = await run_observer_reachability(
+                container_id,
+                context.vulnerabilities,
+                import_map=context.import_map,
+                duration=max(timeout, runtime.coverage_wait),
+                traffic=traffic,
+            )
+        finally:
+            await self._stop_container(container_id)
+
+        return AgentResult.model_validate({
+            "tool_name": self.tool_name,
+            "findings": [f.model_dump() for f in findings],
+            "metadata": {
+                "status": "ok",
+                "mode": "ebpf_observer",
+                "finding_count": len(findings),
+                "container_started": {"status": "yes-running", "id": container_id[:12]},
+                "image_tag": image_tag,
+                "observer": obs_meta,
+            },
+        })
 
     async def _run_ebpf_mode(
         self,
