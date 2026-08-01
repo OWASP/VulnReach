@@ -4,8 +4,15 @@ Language-agnostic, cgroup-scoped syscall observer. Standalone Go/cilium-ebpf bin
 (D8) that loads a CO-RE program, filters events in-kernel by cgroup id, and streams
 NDJSON. See `docs/ebpf-redesign.md` and `docs/ebpf-p0-spec.md`.
 
-**P0 scope:** one program — `sched_process_exec` — proving the pipeline + cgroup
-isolation. Seed of P3. Emits `ready`/`error`/`summary` control lines and `exec` events.
+**Programs:** `sched_process_exec` (P0, `exec`), `sys_enter_openat`/`openat2` (P1, `open`),
+`sys_enter_mmap` filtered to `PROT_EXEC` + file-backed (P4, `mmap_exec`). All are
+cgroup-filtered in-kernel and share one ring buffer; a `kind` field discriminates
+them. Control lines: `ready` / `warn` / `error` / `summary`.
+
+**Rules** (`reachability.py`): R1 open under a package prefix ⇒ loaded ⇒
+POTENTIALLY_REACHABLE→`LIKELY`; R2 native `.so` mapped PROT_EXEC ⇒ compiled code
+executing ⇒ CONFIRMED_REACHABLE→`CONFIRMED` (0.8). mmap gives only a basename, so
+R2 joins it to the full path seen in the open stream for package attribution.
 
 ## Build (in Docker — everything runs in Linux containers)
 
@@ -79,8 +86,9 @@ docker run --rm --privileged --network host --pid=host --cgroupns=host \
   bash -c 'mount -t tracefs nodev /sys/kernel/tracing 2>/dev/null; python3 /repo/agents/ebpf/observer/e2e/scan_driver.py'
 ```
 
-Validated result: 6 LIKELY (Flask, requests, PyYAML, Jinja2, Werkzeug, urllib3 —
-imported at startup) vs 5 NOT_OBSERVED (lxml, cryptography, SQLAlchemy, PyJWT,
+Validated result (with R2 active): **1 CONFIRMED** (PyYAML — its `_yaml` C extension
+was mapped PROT_EXEC), **5 LIKELY** (Flask, requests, Jinja2, Werkzeug, urllib3 —
+pure-Python loads), **5 NOT_OBSERVED** (lxml, cryptography, SQLAlchemy, PyJWT,
 Pillow — installed but never loaded).
 
 **Note:** the scan-runner must install `schemathesis==4.11.0` (same pin as

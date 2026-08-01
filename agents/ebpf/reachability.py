@@ -18,9 +18,14 @@ P2 implements R1 only → POTENTIALLY_REACHABLE. R2/R3/R4 land in P4/P6/P7.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from agents.ebpf.package_index import PackageIndex
+
+# Native extension suffixes: a mapped-executable file with one of these under a
+# package prefix means that package's compiled code is running.
+_NATIVE_SUFFIXES = (".so", ".pyd", ".node", ".dylib")
 
 CONFIRMED_REACHABLE = "CONFIRMED_REACHABLE"
 POTENTIALLY_REACHABLE = "POTENTIALLY_REACHABLE"
@@ -40,28 +45,66 @@ class PackageReach:
 
 def correlate_opens(events: list[dict], index: PackageIndex,
                     max_evidence: int = 5) -> dict[str, PackageReach]:
-    """Rule R1: an ``open`` under a package prefix ⇒ package loaded.
+    """Correlate observer events to per-package reachability.
 
-    Returns {``<ecosystem>:<name>`` → PackageReach} for every package that had at
-    least one matched file-open. Non-open events are ignored.
+    Rule R1 — an ``open`` under a package prefix ⇒ package loaded
+              ⇒ POTENTIALLY_REACHABLE.
+    Rule R2 — a native extension of that package was mapped PROT_EXEC
+              (``mmap_exec``) ⇒ its compiled code is executing
+              ⇒ CONFIRMED_REACHABLE (upgrades R1).
+
+    The kernel gives only the *basename* for mmap_exec (a full path walk needs an
+    unbounded dentry loop), so we join it to the full path already seen in the
+    openat stream to attribute it to a package.
+
+    Returns {``<ecosystem>:<name>`` → PackageReach}.
     """
     reached: dict[str, PackageReach] = {}
-    for ev in events:
-        if ev.get("type") != "open":
-            continue
-        path = ev.get("filename") or ""
-        entry = index.match(path)
-        if entry is None:
-            continue
+    # basename → full path, for native libs observed in the open stream
+    native_paths: dict[str, str] = {}
+
+    def _touch(entry, path: str, verdict: str, rule: str) -> PackageReach:
         key = f"{entry.ecosystem}:{entry.name}"
         pr = reached.get(key)
         if pr is None:
             pr = PackageReach(
                 name=entry.name, ecosystem=entry.ecosystem, version=entry.version,
-                verdict=POTENTIALLY_REACHABLE, rule="R1",
+                verdict=verdict, rule=rule,
             )
             reached[key] = pr
-        pr.hit_count += 1
-        if len(pr.evidence) < max_evidence:
+        if len(pr.evidence) < max_evidence and path not in pr.evidence:
             pr.evidence.append(path)
+        return pr
+
+    # Pass 1 — R1 over file opens; remember native lib paths for the R2 join.
+    for ev in events:
+        if ev.get("type") != "open":
+            continue
+        path = ev.get("filename") or ""
+        if path.endswith(_NATIVE_SUFFIXES):
+            native_paths.setdefault(os.path.basename(path), path)
+        entry = index.match(path)
+        if entry is None:
+            continue
+        pr = _touch(entry, path, POTENTIALLY_REACHABLE, "R1")
+        pr.hit_count += 1
+
+    # Pass 2 — R2: native code mapped executable upgrades the verdict.
+    for ev in events:
+        if ev.get("type") != "mmap_exec":
+            continue
+        base = os.path.basename(ev.get("filename") or "")
+        if not base.endswith(_NATIVE_SUFFIXES):
+            continue
+        path = native_paths.get(base)
+        if path is None:
+            continue  # never saw it opened → cannot attribute to a package
+        entry = index.match(path)
+        if entry is None:
+            continue
+        pr = _touch(entry, path, CONFIRMED_REACHABLE, "R2")
+        pr.verdict = CONFIRMED_REACHABLE  # upgrade if it was R1
+        pr.rule = "R2"
+        pr.hit_count += 1
+
     return reached

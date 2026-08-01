@@ -17,6 +17,9 @@ char LICENSE[] SEC("license") = "GPL"; // required for bpf_get_current_cgroup_id
 
 #define EV_EXEC 0
 #define EV_OPEN 1
+#define EV_MMAP_EXEC 2
+
+#define PROT_EXEC_BIT 0x4
 
 struct event {
     __u64 ts_ns;
@@ -121,4 +124,48 @@ SEC("tracepoint/syscalls/sys_enter_openat2")
 int handle_openat2(struct trace_event_raw_sys_enter *ctx)
 {
     return emit_open((const char *)ctx->args[1]);
+}
+
+// Rule R2 evidence: mmap(..., PROT_EXEC, ..., fd, ...) on a file-backed fd means
+// code from that file was mapped for EXECUTION — the strongest syscall-level
+// proof that a native extension is actually being run (not merely read).
+//
+// mmap(addr, len, prot, flags, fd, off): prot=args[2], fd=args[4].
+// We resolve fd → file → dentry → d_name (basename only; a full path walk needs
+// an unbounded dentry loop). Userspace joins the basename to the full path seen
+// in the openat stream to attribute it to a package.
+SEC("tracepoint/syscalls/sys_enter_mmap")
+int handle_mmap(struct trace_event_raw_sys_enter *ctx)
+{
+    unsigned long prot = (unsigned long)ctx->args[2];
+    int fd = (int)ctx->args[4];
+    if (!(prot & PROT_EXEC_BIT) || fd < 0)
+        return 0; // not executable, or anonymous mapping
+
+    __u64 cg = bpf_get_current_cgroup_id();
+    if (!cgroup_allowed(cg))
+        return 0;
+
+    struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+    struct file **fdarray = BPF_CORE_READ(t, files, fdt, fd);
+    if (!fdarray)
+        return 0;
+
+    struct file *f = NULL;
+    if (bpf_probe_read_kernel(&f, sizeof(f), &fdarray[fd]) || !f)
+        return 0;
+
+    const unsigned char *name = BPF_CORE_READ(f, f_path.dentry, d_name.name);
+    if (!name)
+        return 0;
+
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    fill_common(e, cg, EV_MMAP_EXEC);
+    bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
 }

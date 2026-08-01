@@ -97,6 +97,7 @@ func main() {
 	}{
 		{"sched", "sched_process_exec", objs.HandleExec},
 		{"syscalls", "sys_enter_openat", objs.HandleOpenat},
+		{"syscalls", "sys_enter_mmap", objs.HandleMmap},
 	}
 	for _, t := range required {
 		lk, err := link.Tracepoint(t.group, t.name, t.prog, nil)
@@ -118,7 +119,7 @@ func main() {
 	defer rd.Close()
 
 	emit(map[string]any{"v": 1, "type": "ready", "cgroup_ids": []uint64(cgids),
-		"progs": []string{"sched_process_exec", "sys_enter_openat", "sys_enter_openat2"}})
+		"progs": []string{"sched_process_exec", "sys_enter_openat", "sys_enter_openat2", "sys_enter_mmap"}})
 
 	// Close the reader on signal or after --duration; that unblocks rd.Read().
 	sig := make(chan os.Signal, 1)
@@ -151,8 +152,11 @@ func main() {
 		}
 		count++
 		typ := "exec"
-		if e.Kind == 1 {
+		switch e.Kind {
+		case 1:
 			typ = "open"
+		case 2:
+			typ = "mmap_exec"
 		}
 		emit(map[string]any{
 			"v":         1,

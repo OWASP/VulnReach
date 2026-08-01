@@ -21,7 +21,9 @@ import pytest
 from agents.ebpf.target_resolver import DockerTargetResolver
 from agents.ebpf.observer_client import ObserverClient, _DEFAULT_BIN
 from agents.ebpf.package_index import build_index
-from agents.ebpf.reachability import correlate_opens, POTENTIALLY_REACHABLE
+from agents.ebpf.reachability import (
+    correlate_opens, POTENTIALLY_REACHABLE, CONFIRMED_REACHABLE,
+)
 from agents.ebpf.verdict_integration import to_reachability_findings
 from agents.ebpf.observer_runner import run_observer_reachability, observer_available
 
@@ -205,6 +207,49 @@ def test_verdict_integration_r1(py_app_container):
     tab = findings["tabulate"]
     assert tab.verdict == "NOT_OBSERVED"
     assert not tab.import_detected
+
+
+def test_native_exec_r2_confirmed(py_app_container):
+    """P4/Rule R2: a native extension mapped PROT_EXEC ⇒ CONFIRMED.
+
+    charset_normalizer ships a compiled .so; requests is pure Python. Importing
+    both must yield CONFIRMED for the native package and LIKELY for the pure one.
+    """
+    resolver = DockerTargetResolver()
+    rt = resolver.resolve(py_app_container)
+    index = build_index(f"/proc/{rt.init_pid}/root", ecosystems=("python",))
+
+    async def drive():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=8)
+        try:
+            await asyncio.sleep(1.0)
+            _run("docker", "exec", py_app_container, "python", "-c",
+                 "import requests, charset_normalizer")
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    events = asyncio.run(drive())
+    assert any(e["type"] == "mmap_exec" for e in events), "no mmap_exec events captured"
+
+    reach = correlate_opens(events, index)
+    cn = reach.get("python:charset_normalizer")
+    assert cn is not None, f"charset_normalizer not reached: {sorted(reach)}"
+    assert cn.verdict == CONFIRMED_REACHABLE, f"expected R2 CONFIRMED, got {cn.verdict}/{cn.rule}"
+    assert cn.rule == "R2"
+
+    vulns = [
+        {"package": "charset-normalizer", "cve_id": ["CVE-T-CN"], "severity": "HIGH"},
+        {"package": "requests", "cve_id": ["CVE-T-REQ"], "severity": "HIGH"},
+    ]
+    by_pkg = {f.package: f for f in to_reachability_findings(reach, vulns)}
+    assert by_pkg["charset-normalizer"].verdict == "CONFIRMED"
+    assert by_pkg["charset-normalizer"].call_chain_exists is True
+    assert by_pkg["charset-normalizer"].confidence == 0.8
+    # Pure-Python package stays load-level.
+    assert by_pkg["requests"].verdict == "LIKELY"
+    assert by_pkg["requests"].import_time_hit is True
 
 
 def test_observer_runner_end_to_end(py_app_container):
