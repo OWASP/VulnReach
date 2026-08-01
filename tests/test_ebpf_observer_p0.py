@@ -22,6 +22,7 @@ from agents.ebpf.target_resolver import DockerTargetResolver
 from agents.ebpf.observer_client import ObserverClient, _DEFAULT_BIN
 from agents.ebpf.package_index import build_index
 from agents.ebpf.reachability import correlate_opens, POTENTIALLY_REACHABLE
+from agents.ebpf.verdict_integration import to_reachability_findings
 
 _LINUX = platform.system() == "Linux"
 _ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -161,3 +162,45 @@ def test_package_reach_r1(py_app_container):
     assert reach["python:requests"].verdict == POTENTIALLY_REACHABLE
     assert reach["python:requests"].hit_count > 0
     assert "tabulate" not in reached, "tabulate was never imported but shows reached"
+
+
+def test_verdict_integration_r1(py_app_container):
+    """P5: PackageReach → canonical ReachabilityFinding (D5/D6).
+
+    A reached package maps to LIKELY (import-hit); an unreached vulnerable
+    package maps to NOT_OBSERVED. Verdicts use the canonical enum the rest of
+    the pipeline (risk scoring, policy, storage) already consumes.
+    """
+    resolver = DockerTargetResolver()
+    rt = resolver.resolve(py_app_container)
+    index = build_index(f"/proc/{rt.init_pid}/root", ecosystems=("python",))
+
+    async def drive():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=6)
+        try:
+            await asyncio.sleep(1.0)
+            _run("docker", "exec", py_app_container, "python", "-c", "import requests")
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    reach = correlate_opens(asyncio.run(drive()), index)
+
+    # Simulated SCA output: one CVE in a reached pkg, one in an unreached pkg.
+    vulns = [
+        {"package": "requests", "cve_id": ["CVE-TEST-REQ"], "severity": "HIGH"},
+        {"package": "tabulate", "cve_id": ["CVE-TEST-TAB"], "severity": "HIGH"},
+    ]
+    findings = {f.package: f for f in to_reachability_findings(reach, vulns)}
+
+    req = findings["requests"]
+    assert req.verdict == "LIKELY"
+    assert req.import_detected and req.import_time_hit
+    assert not req.call_chain_exists
+    assert req.evidence_type == "dynamic"
+    assert req.files, "expected evidence paths for reached package"
+
+    tab = findings["tabulate"]
+    assert tab.verdict == "NOT_OBSERVED"
+    assert not tab.import_detected

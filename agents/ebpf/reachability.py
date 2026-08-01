@@ -4,7 +4,12 @@ Maps raw syscall events to package-level reachability verdicts. This is the
 deterministic-first layer (no LLM): Rule R1 attributes file-open events to
 packages via the PackageIndex.
 
-Verdict vocabulary (redesign §6):
+These are eBPF-internal *reachability tiers* describing the strength of the
+runtime evidence. They are NOT the product's verdict enum (D6): the boundary in
+``verdict_integration.to_reachability_findings`` translates them to the canonical
+``Verdict`` (CONFIRMED/LIKELY/POSSIBLE/NOT_OBSERVED) that risk scoring, policy,
+storage and the dashboard consume — R1 load-level ⇒ LIKELY (D5).
+
   CONFIRMED_REACHABLE    package code demonstrably executed (R2 native / Tier B / R4)
   POTENTIALLY_REACHABLE  package files loaded, no proof a function ran (R1)
   NOT_OBSERVED           package present but never seen during the window

@@ -158,28 +158,29 @@ and it's already half-built (`static_findings` path in `coverage_correlator.py`)
 
 ## 6. Verdict contribution
 
-New two-tier vocabulary the user asked for, mapped onto the existing `verdict` field
-(`core/models.py:ReachabilityFinding`). Baseline evidence is coarser than a stack-trace hit, so it
-is **capped** unless enrichment or static cross-ref elevates it.
+**D6 resolved:** reuse the product's **canonical `Verdict`** — `CONFIRMED` / `LIKELY` / `POSSIBLE` /
+`NOT_OBSERVED` (`correlation/engine.py`, wired into `risk_score`, confidence, policy, storage,
+dashboard). **No parallel `*_REACHABLE` enum** — inventing one would break the risk multipliers and
+every consumer. The redesign's earlier two-tier vocabulary is dropped. eBPF findings are emitted as
+`core/models.py:ReachabilityFinding` with these verdicts and `evidence_type="dynamic"`, so they are
+indistinguishable downstream from coverage-derived findings.
 
-| Evidence | Rule | Verdict | Confidence | Notes |
+**D5 resolved:** a pure openat file-load (R1) maps to **`LIKELY` (import-hit)** — matching exactly how
+`coverage_correlator` already treats an import-only hit (`LIKELY`, 0.65, `import_time_hit=True`).
+
+| Evidence | Rule | Verdict | Confidence | Phase |
 |----------|------|---------|-----------|-------|
-| Language uprobe/USDT: package function entry observed (Tier B) | — | **CONFIRMED_REACHABLE** | 0.9 | Only Tier B or R2-native reaches CONFIRMED alone. |
-| Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED_REACHABLE** | 0.8 | Native code demonstrably loaded to execute. |
-| Package file loaded **+** static taint chain's app fn executed | R1+R4 | **CONFIRMED_REACHABLE** | 0.8 | Static precision + runtime load. |
-| Package file loaded (import-level), no call evidence | R1 | **POTENTIALLY_REACHABLE** | 0.5 | = today's `import_hit`, renamed. |
-| Behavioral corroboration (connect+loaded, protocol match) | R3 | **POTENTIALLY_REACHABLE** | 0.6 | Elevate toward confirmed only with R4. |
-| Package in SBOM, never observed loaded | — | **NOT_OBSERVED** | 0.1 | Absence ≠ unreachable (coverage window bound). |
+| Language uprobe/USDT: package function entry observed (Tier B) | — | **CONFIRMED** | 0.95 | P8 |
+| Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED** | 0.8 | P4 |
+| Package file loaded **+** static taint chain's app fn executed | R1+R4 | **CONFIRMED** | 0.9 | P7 |
+| Package file loaded (import-level), no call evidence | R1 | **LIKELY** | 0.65 | **P5 (done)** |
+| Behavioral corroboration (connect+loaded, protocol match) | R3 | **LIKELY/POSSIBLE** | 0.6 | P6 |
+| Package in SBOM, never observed loaded | — | **NOT_OBSERVED** | 0.1 | **P5 (done)** |
 
-Key rule: **a pure-interpreted package (pure-Python/pure-Ruby/pure-Java) cannot reach
-CONFIRMED_REACHABLE from Tier A alone** — the syscall layer can prove it was *loaded* but not that a
-specific function *ran*. CONFIRMED for those requires Tier B enrichment or R4 static cross-ref.
-⚑ DECISION D5 — confirm this is the intended semantics (vs. redefining CONFIRMED to accept
-load-level for native packages only, which is what R2 does).
-
-Backward-compat: keep emitting the legacy `CONFIRMED`/`LIKELY` strings as aliases during migration,
-or map the new enum through a translation layer so existing consumers/dashboards don't break.
-⚑ DECISION D6.
+Key rule (unchanged in substance): **a pure-interpreted package cannot reach `CONFIRMED` from Tier A
+alone** — the syscall layer proves it was *loaded* (→ `LIKELY`), not that a specific function *ran*.
+`CONFIRMED` requires R2-native (P4), Tier B enrichment (P8), or R4 static cross-ref (P7). Implemented
+in `agents/ebpf/verdict_integration.py:to_reachability_findings`.
 
 ---
 
@@ -244,6 +245,11 @@ openat-only degradation for every non-Python/Java runtime. Everything after shar
   retained only for Tier B enrichment prototyping. Consequence: a **compiled eBPF component +
   libbpf/BTF toolchain** enters the build (new for the current pure-Python-orchestrating-bpftrace
   stack); P0 must stand up that toolchain and the userspace ring-buffer consumer (see D8).
+- **✅ D5 — R1 openat load → `LIKELY` (import-hit).** Matches `coverage_correlator`'s import-only-hit
+  treatment (0.65, `import_time_hit=True`). Pure-interpreted packages reach `CONFIRMED` only via
+  R2-native (P4) / Tier B (P8) / R4 static cross-ref (P7). Implemented in P5.
+- **✅ D6 — Reuse the canonical `Verdict`** (`CONFIRMED`/`LIKELY`/`POSSIBLE`/`NOT_OBSERVED`) — no
+  parallel `*_REACHABLE` enum; eBPF findings are canonical `ReachabilityFinding`s. Implemented in P5.
 - **✅ D8 — Observer component: Go + cilium/ebpf, subprocess boundary, NDJSON.** The CO-RE observer
   is a **standalone Go binary** (cilium/ebpf; `bpf2go` embeds the compiled CO-RE objects → one
   static binary, no runtime libbpf/clang/kernel-headers). It emits **NDJSON over a unix socket/stdout**
@@ -256,11 +262,7 @@ openat-only degradation for every non-Python/Java runtime. Everything after shar
 ### 9b. Still open (needed before their phase, not before P0)
 
 - **⚑ D4 — Ecosystem coverage for the Package Index v1.** Python + Node first? Add Go/Java/Ruby in
-  which order? (Ties to which CVEs your users actually hit.)
-- **⚑ D5 — CONFIRMED semantics for pure-interpreted packages.** Accept that they can only reach
-  CONFIRMED via Tier B/R4 (recommended, honest), or loosen it?
-- **⚑ D6 — Verdict enum migration.** New `CONFIRMED_REACHABLE`/`POTENTIALLY_REACHABLE`/`NOT_OBSERVED`
-  as the canonical set with legacy aliases, or keep old strings and add a confidence dimension?
+  which order? (Ties to which CVEs your users actually hit.) *(P2 shipped Python + Node builders.)*
 - **⚑ D7 — Restricted-cluster fallback behavior.** When caps are denied: hard-fail the eBPF stage,
   or silently fall back to Dockerfile-patch mode (and how loudly to surface the downgrade in the
   verdict/report)?
