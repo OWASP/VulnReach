@@ -2255,15 +2255,23 @@ class DynamicReachabilityAgent(BaseTool):
         findings: List[Any] = []
         try:
             base_url = f"http://{_target_host()}:{container_port}"
-            if not await self._wait_for_healthy(base_url, timeout=30):
-                return AgentResult(
-                    tool_name=self.tool_name, findings=[],
-                    metadata={"status": "failed", "step": "observer_health_check",
-                              "container_started": {"status": "no", "id": container_id[:12]}},
-                )
 
+            # Attach the observer BEFORE the app finishes booting: a host-level
+            # observer that attaches after health-wait misses the interpreter's
+            # startup import storm (openat fires once, at first import). We fold
+            # the health-wait + traffic into the traffic callback so the observer
+            # is already recording while the target imports its dependencies.
             async def traffic() -> None:
-                await self._run_schemathesis(base_url, openapi_path, container_port, workdir=None)
+                healthy = await self._wait_for_healthy(base_url, timeout=30)
+                if healthy:
+                    await self._run_schemathesis(
+                        base_url, openapi_path, container_port, workdir=None
+                    )
+                else:
+                    logger.warning(
+                        "[dynamic][observer] target never became healthy — "
+                        "reporting startup-only observation"
+                    )
 
             findings, obs_meta = await run_observer_reachability(
                 container_id,

@@ -70,8 +70,8 @@ async def run_observer_reachability(
     resolver = DockerTargetResolver()
     target = resolver.resolve(container_ref)
 
-    index = build_index(f"/proc/{target.init_pid}/root", ecosystems=ecosystems)
-
+    # Attach the observer FIRST, then build the Package-Index while already
+    # recording — every millisecond before attach is a startup import we miss.
     client = ObserverClient(binary_path or _DEFAULT_BIN)
     await client.start([target.cgroup_id], duration=duration)
 
@@ -79,6 +79,7 @@ async def run_observer_reachability(
     # container fills the observer's stdout pipe and stalls it while we wait.
     collector = asyncio.create_task(client.collect())
     try:
+        index = build_index(f"/proc/{target.init_pid}/root", ecosystems=ecosystems)
         if traffic is not None:
             await traffic()
         else:

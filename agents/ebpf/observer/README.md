@@ -53,3 +53,37 @@ old Debian docker CLI to the Docker Desktop daemon's minimum API.
 
 - `agents/ebpf/target_resolver.py` — `DockerTargetResolver`: container ref → cgroup id.
 - `agents/ebpf/observer_client.py` — `ObserverClient`: async spawn + NDJSON stream.
+- `agents/ebpf/package_index.py` / `reachability.py` — Package-Index + Rule R1.
+- `agents/ebpf/verdict_integration.py` — R1 → canonical `ReachabilityFinding`.
+- `agents/ebpf/observer_runner.py` — `run_observer_reachability`: the agent entrypoint.
+- Enable in a scan: `runtime.ebpf.enabled=true`, `runtime.ebpf.engine="observer"`,
+  and `VULNREACH_ALLOW_EBPF=1`.
+
+## Full-scan e2e (drives DynamicReachabilityAgent._run_observer_mode)
+
+Heavy (builds the target image, needs host networking). Runs the whole agent path
+against `labs/python_vuln_app`.
+
+```bash
+docker build -f Dockerfile.build    -t vulnreach-observer-build .
+docker run --rm --privileged -v "$PWD":/src vulnreach-observer-build make all   # build binary
+docker build -f Dockerfile.test     -t vulnreach-observer-test .
+docker build -f Dockerfile.scanrunner -t vulnreach-scan-runner .
+
+REPO=$(git rev-parse --show-toplevel)
+docker run --rm --privileged --network host --pid=host --cgroupns=host \
+  -v /var/run/docker.sock:/var/run/docker.sock -v "$REPO":/repo \
+  -e PYTHONPATH=/repo -e DOCKER_API_VERSION=1.44 \
+  -e VULNREACH_OBSERVER_BIN=/repo/agents/ebpf/observer/bin/vulnreach-observer \
+  vulnreach-scan-runner \
+  bash -c 'mount -t tracefs nodev /sys/kernel/tracing 2>/dev/null; python3 /repo/agents/ebpf/observer/e2e/scan_driver.py'
+```
+
+Validated result: 6 LIKELY (Flask, requests, PyYAML, Jinja2, Werkzeug, urllib3 —
+imported at startup) vs 5 NOT_OBSERVED (lxml, cryptography, SQLAlchemy, PyJWT,
+Pillow — installed but never loaded).
+
+**Known issue:** the agent's `_run_schemathesis` uses `--url`/`--max-examples`,
+removed in schemathesis ≥3.36 (now `--base-url`/`--hypothesis-max-examples`) → rc=2.
+Pre-existing (also affects legacy coverage mode). The observer still captures the
+interpreter's startup imports, so reachability is reported regardless of traffic.

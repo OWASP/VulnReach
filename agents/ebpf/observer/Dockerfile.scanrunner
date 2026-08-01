@@ -1,0 +1,9 @@
+# Full-scan runner: test image + the DynamicReachabilityAgent's runtime deps
+# (aiohttp health check, pyyaml config, schemathesis traffic). Used to live-run
+# _run_observer_mode against a real target app on a Linux (host-networked) box.
+FROM vulnreach-observer-test
+
+RUN pip install --no-cache-dir --break-system-packages \
+      aiohttp \
+      pyyaml \
+      "schemathesis<4"
