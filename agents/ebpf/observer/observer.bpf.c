@@ -29,6 +29,7 @@ char LICENSE[] SEC("license") = "GPL"; // required for bpf_get_current_cgroup_id
 #define EV_OPEN 1
 #define EV_MMAP_EXEC 2
 #define EV_PY_CALL 3
+#define EV_JAVA_CLASS 4
 
 #define PROT_EXEC_BIT 0x4
 
@@ -83,6 +84,20 @@ struct {
     __type(key, __u32);
     __type(value, __u32);
 } py_cfg SEC(".maps");
+
+// jvm_cfg slots. USDT arguments live in whatever register the compiler happened
+// to use, described by the probe's arg descriptor (e.g. "8@x3 -4@x2 ..."), so
+// userspace resolves the register names to parameter indices and passes them in.
+#define JVM_CFG_NAME_REG 0 // param index (1-6) holding the class-name char*
+#define JVM_CFG_LEN_REG  1 // param index holding its length (0 => read to NUL)
+#define JVM_CFG_N        2
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, JVM_CFG_N);
+    __type(key, __u32);
+    __type(value, __u32);
+} jvm_cfg SEC(".maps");
 
 // "<module>" as a little-endian u64 — conveniently exactly 8 bytes. A frame
 // whose co_name is this is a module *body* (i.e. an import), not a call into
@@ -308,6 +323,66 @@ int handle_py_frame(struct pt_regs *ctx)
 
     fill_common(e, cg, EV_PY_CALL);
     bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)(fname + payload));
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+static __always_inline __u64 pt_parm(struct pt_regs *ctx, __u32 idx)
+{
+    switch (idx) {
+    case 1: return (__u64)PT_REGS_PARM1_CORE(ctx);
+    case 2: return (__u64)PT_REGS_PARM2_CORE(ctx);
+    case 3: return (__u64)PT_REGS_PARM3_CORE(ctx);
+    case 4: return (__u64)PT_REGS_PARM4_CORE(ctx);
+    case 5: return (__u64)PT_REGS_PARM5_CORE(ctx);
+    }
+    // PARM6 has no _CORE variant on all arches; 5 covers every probe we use.
+    return 0;
+}
+
+// Rule R6 evidence (Tier B, Java): the `hotspot:class__loaded` USDT probe, which
+// stock JDK images ship enabled (567 probes in libjvm.so; no -XX flag needed,
+// DTraceMethodProbes stays off). The JVM loads a class on *first active use*, so
+// unlike a Python import this is already a use signal — and paired with the
+// traffic boundary it means "this class was needed to serve a request".
+//
+// The name is a HotSpot Symbol body: NOT NUL-terminated, so we use the length
+// argument the probe provides rather than reading to a NUL.
+SEC("uprobe/jvm_class_loaded")
+int handle_java_class(struct pt_regs *ctx)
+{
+    __u32 name_idx = 0, len_idx = 0;
+    __u32 k = JVM_CFG_NAME_REG;
+    __u32 *v = bpf_map_lookup_elem(&jvm_cfg, &k);
+    if (!v || !*v)
+        return 0; // not configured => Java Tier B disabled
+    name_idx = *v;
+    k = JVM_CFG_LEN_REG;
+    v = bpf_map_lookup_elem(&jvm_cfg, &k);
+    len_idx = v ? *v : 0;
+
+    __u64 name = pt_parm(ctx, name_idx);
+    if (!name)
+        return 0;
+
+    __u64 cg = bpf_get_current_cgroup_id();
+    if (!cgroup_allowed(cg))
+        return 0;
+
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return 0;
+    fill_common(e, cg, EV_JAVA_CLASS);
+
+    if (len_idx) {
+        // Bound the length so the verifier can prove the write stays in bounds.
+        __u32 n = (__u32)pt_parm(ctx, len_idx) & (FN_LEN - 1);
+        bpf_probe_read_user(&e->filename, n, (void *)name);
+        e->filename[n] = 0;
+    } else {
+        bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)name);
+    }
 
     bpf_ringbuf_submit(e, 0);
     return 0;

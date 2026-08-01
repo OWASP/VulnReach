@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -148,12 +149,64 @@ func attachPython(objs *observerObjects, libPath, version string) (link.Link, bo
 	return lk, true
 }
 
+// attachJVM wires up Java Tier B via the hotspot:class__loaded USDT probe.
+// Stock JDK images ship it active (no -XX flag), and because the JVM loads a
+// class on first active use it is already a use signal, not just a load signal.
+// Best-effort throughout, exactly like the Python path.
+func attachJVM(objs *observerObjects, libjvm string) (link.Link, bool) {
+	if libjvm == "" {
+		return nil, false
+	}
+	probe, err := findUSDT(libjvm, "hotspot", "class__loaded")
+	if err != nil {
+		emit(map[string]any{"v": 1, "type": "warn", "msg": "tier-b(jvm): " + err.Error()})
+		return nil, false
+	}
+	nameReg := probe.ArgReg(0, runtime.GOARCH)
+	if nameReg == 0 {
+		emit(map[string]any{"v": 1, "type": "warn",
+			"msg": "tier-b(jvm): class name not in a parameter register on " +
+				runtime.GOARCH + " (args: " + probe.Args + ")"})
+		return nil, false
+	}
+	lenReg := probe.ArgReg(1, runtime.GOARCH) // 0 => fall back to a NUL-terminated read
+
+	off, err := probe.fileOffset(libjvm)
+	if err != nil {
+		emit(map[string]any{"v": 1, "type": "warn", "msg": "tier-b(jvm): " + err.Error()})
+		return nil, false
+	}
+
+	ex, err := link.OpenExecutable(libjvm)
+	if err != nil {
+		emit(map[string]any{"v": 1, "type": "warn", "msg": "tier-b(jvm): open: " + err.Error()})
+		return nil, false
+	}
+	lk, err := ex.Uprobe("", objs.HandleJavaClass, &link.UprobeOptions{Address: off})
+	if err != nil {
+		emit(map[string]any{"v": 1, "type": "warn", "msg": "tier-b(jvm): uprobe attach: " + err.Error()})
+		return nil, false
+	}
+
+	for k, v := range map[uint32]uint32{0: uint32(nameReg), 1: uint32(lenReg)} {
+		if err := objs.JvmCfg.Put(k, v); err != nil {
+			emit(map[string]any{"v": 1, "type": "warn", "msg": "tier-b(jvm): jvm_cfg.Put: " + err.Error()})
+			lk.Close()
+			return nil, false
+		}
+	}
+	emit(map[string]any{"v": 1, "type": "warn",
+		"msg": fmt.Sprintf("tier-b(jvm): attached at +%#x name=parm%d len=parm%d", off, nameReg, lenReg)})
+	return lk, true
+}
+
 func main() {
 	var cgids cgidFlags
 	flag.Var(&cgids, "cgroup-id", "target cgroup id (repeatable); none => observe all")
 	duration := flag.Int("duration", 0, "seconds to run (0 = until SIGINT/SIGTERM)")
 	pythonLib := flag.String("python-lib", "", "host-visible path to the target's libpython (Tier B enrichment; best-effort)")
 	pythonVersion := flag.String("python-version", "", "target CPython version e.g. 3.11 (default: inferred from --python-lib)")
+	jvmLib := flag.String("jvm-lib", "", "host-visible path to the target's libjvm.so (Java Tier B; best-effort)")
 	flag.Parse()
 
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -227,6 +280,11 @@ func main() {
 		}()
 	}
 
+	if lk, ok := attachJVM(&objs, *jvmLib); ok {
+		defer lk.Close()
+		progs = append(progs, "uprobe:jvm_class_loaded")
+	}
+
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
 		fatal("ringbuf reader: " + err.Error())
@@ -273,6 +331,8 @@ func main() {
 			typ = "mmap_exec"
 		case 3:
 			typ = "py_call"
+		case 4:
+			typ = "java_class"
 		}
 		emit(map[string]any{
 			"v":         1,
