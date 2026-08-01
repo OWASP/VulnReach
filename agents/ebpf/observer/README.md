@@ -5,8 +5,9 @@ Language-agnostic, cgroup-scoped syscall observer. Standalone Go/cilium-ebpf bin
 NDJSON. See `docs/ebpf-redesign.md` and `docs/ebpf-p0-spec.md`.
 
 **Programs:** `sched_process_exec` (P0, `exec`), `sys_enter_openat`/`openat2` (P1, `open`),
-`sys_enter_mmap` filtered to `PROT_EXEC` + file-backed (P4, `mmap_exec`), and a
-best-effort uprobe on CPython's eval loop (P8, `py_call`). All are cgroup-filtered
+`sys_enter_mmap` filtered to `PROT_EXEC` + file-backed (P4, `mmap_exec`), and two
+best-effort Tier B probes: a uprobe on CPython's eval loop (`py_call`) and the
+JVM's `hotspot:class__loaded` USDT probe (`java_class`). All are cgroup-filtered
 in-kernel and share one ring buffer; a `kind` field discriminates them.
 Control lines: `ready` / `warn` / `marked` / `error` / `summary`.
 
@@ -15,8 +16,9 @@ POTENTIALLY_REACHABLE→`LIKELY`; R2 native `.so` mapped PROT_EXEC ⇒ compiled 
 executing ⇒ CONFIRMED_REACHABLE→`CONFIRMED` (0.8). mmap gives only a basename, so
 R2 joins it to the full path seen in the open stream for package attribution.
 
-R5 (Tier B) is the CPython uprobe: it reports which *source file* the interpreter
-actually evaluated a frame from. See "Tier B" below.
+R5 (Tier B, Python) is the CPython uprobe: which *source file* the interpreter
+evaluated a frame from. R6 (Tier B, Java) is the JVM class__loaded probe: which
+*class* was resolved. Both ⇒ `CONFIRMED` (0.85). See "Tier B" below.
 
 R4 (`verdict_integration.py`) cross-references the static tainter: a package that is
 loaded (R1) **and** sits at the end of a taint flow ⇒ `CONFIRMED` (0.9); a taint flow
@@ -49,6 +51,35 @@ Pass `--python-lib <host-visible path to libpython>` to attach a uprobe on
   which bumps the dedupe epoch so files reported during startup can be reported
   once more while serving requests. Only post-mark frames count as R5; earlier
   ones fall back to load-level R1.
+
+## Tier B — JVM class loads (Rule R6, optional)
+
+Pass `--jvm-lib <host-visible path to libjvm.so>`. Same best-effort contract as
+the Python probe.
+
+- **USDT, and it actually exists here.** Unlike CPython, stock JDK images ship
+  `libjvm.so` with ~567 active USDT probes. `class__loaded` has no semaphore and
+  is *not* gated by `DTraceMethodProbes` (which stays off by default), so no
+  `-XX` flag and no image change are needed.
+- **A stronger signal than Python's by construction.** The JVM resolves a class
+  on *first active use*, so a class load already means the code was needed — not
+  merely that a file was on disk. The traffic boundary still applies: classes
+  resolved while wiring up the app at boot are startup work.
+- **cilium/ebpf has no USDT support**, so `usdt.go` parses `.note.stapsdt`
+  itself: it converts the probe's recorded address to a file offset (applying the
+  `.stapsdt.base` prelink fixup and mapping through PT_LOAD) and resolves which
+  register each argument lives in. USDT arguments are **not** in
+  calling-convention order — for `class__loaded` the name is in `x3` and its
+  length in `x2` — so registers are resolved at attach time and passed via a map.
+  Arguments in memory operands are unsupported and warn out.
+- **The class name is a HotSpot `Symbol` body and is not NUL-terminated.** The
+  read is length-bounded; reading to a NUL yields trailing garbage.
+
+Java packages are indexed by **class-name prefix** (`com/fasterxml/jackson/`),
+not file path — the probe never reports a path. `build_java` reads each jar's
+entries, takes coordinates from `META-INF/maven/*/pom.properties` (falling back
+to the filename), and unpacks Spring Boot `BOOT-INF/lib/` nested jars so a fat
+jar's dependencies are attributed individually.
 
 ## Build (in Docker — everything runs in Linux containers)
 

@@ -107,13 +107,29 @@ def find_libpython(container_root: str) -> Optional[str]:
     return None
 
 
+def find_libjvm(container_root: str) -> Optional[str]:
+    """Locate the target's libjvm.so for the Java Tier B probe (Rule R6).
+
+    Returns a host-visible path (under ``/proc/<pid>/root``) or None. None is not
+    an error — Tier B is optional and the Tier A baseline stands without it.
+    """
+    for pat in ("opt/java/*/lib/server/libjvm.so",
+                "usr/lib/jvm/*/lib/server/libjvm.so",
+                "usr/lib/jvm/*/jre/lib/*/server/libjvm.so",
+                "opt/*/lib/server/libjvm.so"):
+        for hit in sorted(glob.glob(os.path.join(container_root, pat))):
+            if os.path.isfile(hit):
+                return hit
+    return None
+
+
 async def run_observer_reachability(
     container_ref: str,
     vulnerabilities: list[dict],
     *,
     import_map: Optional[dict[str, str]] = None,
     taint_flows: Optional[list[dict]] = None,
-    ecosystems: tuple[str, ...] = ("python", "node"),
+    ecosystems: tuple[str, ...] = ("python", "node", "java"),
     duration: int = 10,
     binary_path: Optional[str] = None,
     traffic: Optional[Callable[[], Awaitable[None]]] = None,
@@ -142,12 +158,15 @@ async def run_observer_reachability(
     container_root = f"/proc/{target.init_pid}/root"
     # A cheap glob, done before attach so it can't delay it further.
     libpython = find_libpython(container_root) if "python" in ecosystems else None
+    libjvm = find_libjvm(container_root) if "java" in ecosystems else None
 
     # Attach the observer FIRST, then build the Package-Index while already
     # recording — every millisecond before attach is a startup import we miss.
     client = ObserverClient(binary_path or _DEFAULT_BIN)
-    ready = await client.start([target.cgroup_id], duration=duration, python_lib=libpython)
-    tier_b = "uprobe:py_eval_frame" in (ready.get("progs") or [])
+    ready = await client.start([target.cgroup_id], duration=duration,
+                               python_lib=libpython, jvm_lib=libjvm)
+    progs = ready.get("progs") or []
+    tier_b = "uprobe:py_eval_frame" in progs or "uprobe:jvm_class_loaded" in progs
     if window is not None and tier_b:
         window.attach(client.mark)
 
@@ -175,11 +194,13 @@ async def run_observer_reachability(
         "index_entries": len(index),
         "open_events": sum(1 for e in events if e.get("type") == "open"),
         "py_call_events": sum(1 for e in events if e.get("type") == "py_call"),
+        "java_class_events": sum(1 for e in events if e.get("type") == "java_class"),
         "packages_reached": len(reach),
         "reached": sorted({pr.name for pr in reach.values()}),
         "native_exec": sorted({pr.name for pr in reach.values() if "R2" in pr.rule}),
-        "code_executed": sorted({pr.name for pr in reach.values() if "R5" in pr.rule}),
-        "tier_b": {"enabled": tier_b, "libpython": libpython,
+        "code_executed": sorted({pr.name for pr in reach.values()
+                                 if "R5" in pr.rule or "R6" in pr.rule}),
+        "tier_b": {"enabled": tier_b, "libpython": libpython, "libjvm": libjvm,
                    "traffic_start_ns": window.start_ns if window else None},
         "taint_modules": sorted(_taint_modules(taint_flows)),
     }

@@ -10,8 +10,9 @@ which is authoritative for on-disk layout. An optional SBOM version map can enri
 entries. Paths stored are **container-absolute** (the ``/proc/<pid>/root`` prefix is
 stripped) so they match what the observer emits from inside the container's mount ns.
 
-Ecosystems in v1 (D4 lean: Python + Node first): python (site/dist-packages),
-node (node_modules). Extend by adding a ``build_<eco>()`` function.
+Ecosystems: python (site/dist-packages), node (node_modules), java (jars, keyed by
+*class-name* prefix rather than file path — see the Java section). Extend by adding
+a ``build_<eco>()`` function.
 """
 from __future__ import annotations
 
@@ -33,8 +34,9 @@ def _norm(name: str) -> str:
 @dataclass(frozen=True)
 class PackageEntry:
     name: str
-    ecosystem: str                 # "python" | "node"
-    path_prefix: str               # container-absolute; dirs end with "/"
+    ecosystem: str                 # "python" | "node" | "java"
+    path_prefix: str               # container-absolute path, or a Java class-name
+                                   # prefix like "com/fasterxml/jackson/"; dirs end "/"
     version: Optional[str] = None
     kind: str = "pure"             # "pure" | "native" (native detection is P4/R2)
 
@@ -181,6 +183,112 @@ def build_node(container_root: str, max_depth: int = 12) -> list[PackageEntry]:
     return entries
 
 
+# ── Java ──────────────────────────────────────────────────────────────────────
+#
+# Java is indexed by *class-name prefix*, not file path: the JVM's class__loaded
+# probe reports "com/fasterxml/jackson/databind/ObjectMapper", never a path. That
+# shares the PackageIndex's longest-prefix machinery because the two namespaces
+# are naturally disjoint — class names never start with "/".
+
+_JAR_NAME_RE = re.compile(r"^(?P<n>.+?)-(?P<v>\d[\w.]*(?:-[A-Za-z][\w.]*)?)\.jar$")
+_MAVEN_PROPS_RE = re.compile(r"^META-INF/maven/[^/]+/[^/]+/pom\.properties$")
+
+
+def _minimal_prefixes(dirs: set[str]) -> list[str]:
+    """Drop any package dir that already sits under another one from the same jar.
+
+    A jar owning com/foo/ and com/foo/bar/ only needs com/foo/ — this keeps the
+    index small and the longest-prefix match unambiguous.
+    """
+    out: list[str] = []
+    for d in sorted(dirs, key=len):
+        if not any(d.startswith(k) for k in out):
+            out.append(d)
+    return out
+
+
+def _jar_coordinates(zf, jar_path: str) -> tuple[str, Optional[str]]:
+    """(artifactId, version) from the jar's embedded Maven metadata, else its name."""
+    for entry in zf.namelist():
+        if _MAVEN_PROPS_RE.match(entry):
+            try:
+                props = dict(
+                    line.split("=", 1)
+                    for line in zf.read(entry).decode("utf-8", "replace").splitlines()
+                    if "=" in line and not line.startswith("#")
+                )
+            except (OSError, ValueError, KeyError):
+                continue
+            artifact = (props.get("artifactId") or "").strip()
+            if artifact:
+                return artifact, (props.get("version") or "").strip() or None
+    base = os.path.basename(jar_path)
+    m = _JAR_NAME_RE.match(base)
+    if m:
+        return m.group("n"), m.group("v")
+    return base[:-4] if base.endswith(".jar") else base, None
+
+
+def _index_jar(zf, jar_path: str, entries: list[PackageEntry], depth: int = 0) -> None:
+    import io
+    import zipfile
+
+    names = zf.namelist()
+    artifact, version = _jar_coordinates(zf, jar_path)
+
+    pkg_dirs = {
+        n.rsplit("/", 1)[0] + "/"
+        for n in names
+        if n.endswith(".class") and "/" in n and not n.startswith("META-INF/")
+    }
+    # Spring Boot fat jars nest the real dependencies under BOOT-INF/lib/ and the
+    # application's own classes under BOOT-INF/classes/. Without this, every class
+    # in a Boot app would be attributed to the single outer jar.
+    pkg_dirs = {d[len("BOOT-INF/classes/"):] if d.startswith("BOOT-INF/classes/") else d
+                for d in pkg_dirs}
+    pkg_dirs = {d for d in pkg_dirs if d and not d.startswith(("BOOT-INF/", "WEB-INF/"))}
+
+    for prefix in _minimal_prefixes(pkg_dirs):
+        entries.append(PackageEntry(name=artifact, ecosystem="java",
+                                    path_prefix=prefix, version=version))
+
+    if depth == 0:
+        for n in names:
+            if n.startswith(("BOOT-INF/lib/", "WEB-INF/lib/")) and n.endswith(".jar"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(zf.read(n))) as nested:
+                        _index_jar(nested, n, entries, depth + 1)
+                except (OSError, ValueError, zipfile.BadZipFile):
+                    continue
+
+
+def build_java(container_root: str, max_depth: int = 9,
+               max_jars: int = 2000) -> list[PackageEntry]:
+    """Index every jar reachable under *container_root* by class-name prefix."""
+    import zipfile
+
+    entries: list[PackageEntry] = []
+    root = container_root.rstrip("/")
+    base_depth = root.count("/")
+    seen = 0
+    for dirpath, dirs, files in os.walk(root):
+        if dirpath.count("/") - base_depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in _PRUNE_DIRS]
+        for f in files:
+            if not f.endswith(".jar") or seen >= max_jars:
+                continue
+            seen += 1
+            full = os.path.join(dirpath, f)
+            try:
+                with zipfile.ZipFile(full) as zf:
+                    _index_jar(zf, full, entries)
+            except (OSError, ValueError, zipfile.BadZipFile):
+                continue
+    return entries
+
+
 # ── Public builder ────────────────────────────────────────────────────────────
 
 def build_index(container_root: str,
@@ -191,4 +299,6 @@ def build_index(container_root: str,
         idx.extend(build_python(container_root))
     if "node" in ecosystems:
         idx.extend(build_node(container_root))
+    if "java" in ecosystems:
+        idx.extend(build_java(container_root))
     return idx

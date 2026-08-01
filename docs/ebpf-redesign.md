@@ -180,6 +180,37 @@ in 3.12), so one program covers 3.8–3.13. The probe fires on every Python call
 kernel side dedupes by `co_filename` pointer; an epoch in the dedupe key (bumped over
 the observer's stdin at `mark`) lets a file be reported once more during traffic.
 
+### 5.4c Rule R6 — JVM class loaded *(implemented, P8 — Tier B, Java)*
+Java is where the redesign's original USDT plan actually holds. Stock JDK images ship
+`libjvm.so` with ~567 **active** USDT probes; `hotspot:class__loaded` carries no
+semaphore and is not gated by `DTraceMethodProbes`, so it needs no `-XX` flag and no
+image change — the opposite of the CPython situation in §5.4b.
+
+It is also a **stronger signal than R5 by construction**: the JVM resolves a class on
+*first active use*, so a class load already means the code was needed. The traffic
+boundary still applies (classes resolved while wiring up the app at boot are startup
+work), and it is cheap — a few thousand class loads per run rather than a probe on
+every call.
+
+Implementation notes: cilium/ebpf has no USDT support, so `usdt.go` parses
+`.note.stapsdt` directly — converting the probe address to a file offset (`.stapsdt.base`
+prelink fixup + PT_LOAD mapping) and resolving argument registers. USDT arguments are
+**not** in calling-convention order (the class name is in `x3`, its length in `x2`), so
+registers are resolved at attach and passed in via a map. The name is a HotSpot `Symbol`
+body and is **not NUL-terminated**, so the read is length-bounded.
+
+Java packages are indexed by **class-name prefix**, not file path (`build_java`): jar
+entries give the prefixes, `META-INF/maven/*/pom.properties` gives the coordinates, and
+Spring Boot `BOOT-INF/lib/` nested jars are unpacked so a fat jar's dependencies are
+attributed individually.
+
+**Node was assessed and deliberately descoped.** `node:20-slim` has **0 USDT notes**, is
+a static binary, and V8 JIT-compiles JS, so there is no stable per-call entry point.
+Extracting a script name means walking `SharedFunctionInfo → Script` through pointer
+compression with no stable ABI across Node minors — a fragile offset table of exactly the
+kind §5.4b already had to be careful about. Node keeps the Tier A R1 baseline, which is
+honest, rather than a manufactured CONFIRMED.
+
 ### 5.5 Rule R4 — static-taint cross-reference *(implemented, P7)*
 If static taint says `app_fn F → package P` **and** Tier A observed P loaded (R1), elevate P to
 `CONFIRMED`. This is how a coarse syscall signal borrows precision from static analysis: the
@@ -215,6 +246,7 @@ indistinguishable downstream from coverage-derived findings.
 |----------|------|---------|-----------|-------|
 | Code executed during traffic **+** static taint path reaches it | R2/R5+R4 | **CONFIRMED** | 0.95 | **P7/P8 (done)** |
 | Interpreter evaluated a frame from the package while serving traffic | R5 | **CONFIRMED** | 0.85 | **P8 (done)** |
+| JVM resolved a class from the package while serving traffic | R6 | **CONFIRMED** | 0.85 | **P8 (done)** |
 | Package file loaded **+** static taint path reaches it | R1+R4 | **CONFIRMED** | 0.9 | **P7 (done)** |
 | Native `.so` of package mapped PROT_EXEC | R2 | **CONFIRMED** | 0.8 | **P4 (done)** |
 | Package file loaded (import-level), no call evidence | R1 | **LIKELY** | 0.65 | **P5 (done)** |
@@ -269,7 +301,7 @@ LLM**. Enrichment (Phase 8) is where the old rich logic returns.
 | **P5 — Verdict integration** | New enum, mapping table (§6), wire into `correlate_coverage`; legacy-alias shim. | Unit-test each evidence combo → expected verdict/confidence; dashboard consumes without breaking. |
 | **P6 — `net_connect`/`net_io` + Rule R3** | Behavioral corroboration with deterministic port/protocol table. | Container making a DB connect; assert R3 corroborates the driver package only when loaded. |
 | **P7 — Static-taint cross-ref (R4)** ✅ | `taint_modules()` + canonical `dynamic_reachability_verdict()` in `verdict_integration.py`; `taint_flows` threaded from `ScanContext`. | `test_taint_crossref_r4_confirmed` (LIKELY→CONFIRMED 0.9 with taint), `test_taint_only_is_possible`; full-scan e2e on `labs/python_vuln_app` with real `findings.json` flows. |
-| **P8 — Tier B enrichment (Rule R5)** ✅ | cgroup-scoped **uprobe** on `_PyEval_EvalFrameDefault` (not USDT — see §5.4b), version-keyed offsets, in-kernel dedupe + traffic epoch; best-effort attach; **baseline unaffected if it fails**. | `test_interpreted_exec_r5_confirmed` (A/B: same workload is LIKELY without Tier B, CONFIRMED with it), `test_tier_b_failure_preserves_baseline` (bogus lib → observer still ready, Tier A intact), `test_r5_traffic_boundary_separates_import_from_use` (import-only stays LIKELY). |
+| **P8 — Tier B enrichment (Rules R5 Python / R6 Java)** ✅ | cgroup-scoped **uprobe** on `_PyEval_EvalFrameDefault` (not USDT — see §5.4b), version-keyed offsets, in-kernel dedupe + traffic epoch; best-effort attach; **baseline unaffected if it fails**. | `test_interpreted_exec_r5_confirmed` (A/B: same workload is LIKELY without Tier B, CONFIRMED with it), `test_tier_b_failure_preserves_baseline` (bogus lib → observer still ready, Tier A intact), `test_r5_traffic_boundary_separates_import_from_use` (import-only stays LIKELY), `test_java_class_load_r6_confirmed` (two jars on the classpath, only the used one reaches CONFIRMED). |
 | **P9 — containerd/CRI resolver + node DaemonSet** (if D2 says in-scope) | Second `TargetResolver` impl; DaemonSet lifecycle. | K8s kind cluster: DaemonSet attaches to a scanned pod, same programs, same output. |
 
 Sequencing note: **P1→P2 is the MVP** — a language-agnostic baseline that already beats today's

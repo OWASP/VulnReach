@@ -7,7 +7,7 @@ NOT_OBSERVED — no parallel enum).
 
 Verdict mapping (D5):
   R2/R5+R4 code ran AND a static taint path reaches it    → CONFIRMED (0.95)
-  R5 interpreter evaluated a frame from the package       → CONFIRMED (0.85)
+  R5/R6 the runtime executed the package's code           → CONFIRMED (0.85)
   R2 native code mapped PROT_EXEC (compiled code running) → CONFIRMED (0.8)
   R4 package loaded + static taint flow reaches it        → CONFIRMED (0.9)
   R1 openat load (package files loaded, no call proof)    → LIKELY  (import-hit)
@@ -37,7 +37,7 @@ from agents.ebpf.reachability import PackageReach, CONFIRMED_REACHABLE
 
 # Confidence values kept identical to coverage_correlator for consistency.
 _CONF_NATIVE_EXEC = 0.8   # R2: native code mapped PROT_EXEC (redesign §6)
-_CONF_INTERPRETED_EXEC = 0.85  # R5: interpreter evaluated a frame from the package
+_CONF_INTERPRETED_EXEC = 0.85  # R5/R6: the runtime actually executed the package's code
 _CONF_EXEC_TAINTED = 0.95  # R2/R5 + R4: code ran AND a taint path reaches it
 _CONF_TAINT_CONFIRMED = 0.9  # R4: runtime load + static taint path
 _CONF_IMPORT_HIT = 0.65
@@ -118,8 +118,10 @@ def to_reachability_findings(
             verdict = "CONFIRMED"
             if has_taint:
                 confidence = _CONF_EXEC_TAINTED
-            elif "R5" in pr.rule:
-                # A frame actually ran — stricter than "was mapped executable".
+            elif "R5" in pr.rule or "R6" in pr.rule:
+                # Code actually ran — stricter than "was mapped executable".
+                # R5: a Python frame was evaluated. R6: the JVM resolved a class,
+                # which it only does on first active use.
                 confidence = _CONF_INTERPRETED_EXEC
             else:
                 confidence = _CONF_NATIVE_EXEC

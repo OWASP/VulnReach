@@ -26,7 +26,8 @@ from agents.ebpf.reachability import (
 )
 from agents.ebpf.verdict_integration import to_reachability_findings
 from agents.ebpf.observer_runner import (
-    run_observer_reachability, observer_available, find_libpython, TrafficWindow,
+    run_observer_reachability, observer_available, find_libpython, find_libjvm,
+    TrafficWindow,
 )
 
 _LINUX = platform.system() == "Linux"
@@ -491,3 +492,78 @@ def test_r5_traffic_boundary_separates_import_from_use(py_app_container):
     # Same events without the boundary: tabulate would be indistinguishable.
     naive = correlate_opens(events, index)
     assert naive["python:tabulate"].verdict == CONFIRMED_REACHABLE
+
+
+_JAVA_IMAGE = os.environ.get("VULNREACH_JAVA_FIXTURE", "vulnreach-java-fixture")
+
+
+@pytest.fixture()
+def java_app_container():
+    name = f"vr_java_{uuid.uuid4().hex[:8]}"
+    _run("docker", "run", "-d", "--name", name, _JAVA_IMAGE, "sleep", "600")
+    try:
+        yield name
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+async def _docker_exec(container: str, *cmd: str) -> None:
+    """Async so the collector keeps draining the observer's stdout."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", container, *cmd,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+def test_java_class_load_r6_confirmed(java_app_container):
+    """Rule R6: the JVM resolves a class only on first active use.
+
+    Both jars are on the classpath, so nothing static can tell them apart —
+    only the class__loaded probe shows that com.example.used.Greeter was needed
+    and com.example.unused.Idle never was.
+    """
+    rt = DockerTargetResolver().resolve(java_app_container)
+    root = f"/proc/{rt.init_pid}/root"
+    index = build_index(root, ecosystems=("java",))
+    names = {e.name for e in index.entries()}
+    assert {"usedlib", "unusedlib"} <= names, f"fixture jars not indexed: {sorted(names)}"
+
+    libjvm = find_libjvm(root)
+    assert libjvm is not None, "no libjvm.so found in the fixture image"
+    window = TrafficWindow()
+
+    async def go():
+        client = ObserverClient(_BIN)
+        ready = await client.start([rt.cgroup_id], duration=20, jvm_lib=libjvm)
+        assert "uprobe:jvm_class_loaded" in ready["progs"], f"jvm tier B not attached: {ready}"
+        window.attach(client.mark)
+        try:
+            await asyncio.sleep(1.0)
+            window.mark()
+            await asyncio.sleep(0.3)
+            await _docker_exec(java_app_container, "java", "-cp",
+                               "/libs/usedlib-1.0.jar:/libs/unusedlib-1.0.jar:/app", "App")
+            await asyncio.sleep(0.5)
+            return await client.collect()
+        finally:
+            await client.stop()
+
+    events = asyncio.run(go())
+    assert any(e["type"] == "java_class" for e in events), "no java_class events captured"
+
+    reach = correlate_opens(events, index, traffic_start_ns=window.start_ns)
+    used = reach.get("java:usedlib")
+    assert used is not None, f"usedlib not reached: {sorted(reach)}"
+    assert used.verdict == CONFIRMED_REACHABLE, f"expected R6 CONFIRMED, got {used.verdict}/{used.rule}"
+    assert used.rule == "R6"
+    assert used.version == "1.0"
+    assert "java:unusedlib" not in reach, "a jar that was never used shows as reached"
+
+    vulns = [{"package": "usedlib", "cve_id": ["CVE-T-USED"], "severity": "HIGH"},
+             {"package": "unusedlib", "cve_id": ["CVE-T-UNUSED"], "severity": "HIGH"}]
+    by_pkg = {f.package: f for f in to_reachability_findings(reach, vulns)}
+    assert by_pkg["usedlib"].verdict == "CONFIRMED"
+    assert by_pkg["usedlib"].confidence == 0.85
+    assert by_pkg["usedlib"].call_chain_exists is True
+    assert by_pkg["unusedlib"].verdict == "NOT_OBSERVED"

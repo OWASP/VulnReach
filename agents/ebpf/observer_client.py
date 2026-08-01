@@ -35,10 +35,12 @@ class ObserverClient:
 
     async def start(self, cgroup_ids: list[int], duration: int = 0,
                     ready_timeout: float = 10.0,
-                    python_lib: Optional[str] = None) -> dict[str, Any]:
+                    python_lib: Optional[str] = None,
+                    jvm_lib: Optional[str] = None) -> dict[str, Any]:
         """Spawn the observer and return the parsed ``ready`` line.
 
-        ``python_lib`` enables Tier B enrichment (the CPython uprobe, Rule R5).
+        ``python_lib`` / ``jvm_lib`` enable Tier B enrichment (the CPython uprobe
+        for Rule R5, the JVM class__loaded USDT probe for Rule R6).
         It is best-effort: an unusable path makes the observer emit a ``warn``
         and carry on with the Tier A baseline, never an ``error``.
 
@@ -55,6 +57,8 @@ class ObserverClient:
             args += ["--duration", str(duration)]
         if python_lib:
             args += ["--python-lib", python_lib]
+        if jvm_lib:
+            args += ["--jvm-lib", jvm_lib]
 
         self._proc = await asyncio.create_subprocess_exec(
             *args,

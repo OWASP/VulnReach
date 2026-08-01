@@ -10,13 +10,14 @@ runtime evidence. They are NOT the product's verdict enum (D6): the boundary in
 ``Verdict`` (CONFIRMED/LIKELY/POSSIBLE/NOT_OBSERVED) that risk scoring, policy,
 storage and the dashboard consume — R1 load-level ⇒ LIKELY (D5).
 
-  CONFIRMED_REACHABLE    package code demonstrably executed (R2 native / R5 Tier B)
+  CONFIRMED_REACHABLE    package code demonstrably executed (R2 native / R5, R6 Tier B)
   POTENTIALLY_REACHABLE  package files loaded, no proof a function ran (R1)
   NOT_OBSERVED           package present but never seen during the window
 
 Rules implemented here: R1 (open ⇒ loaded), R2 (native .so mapped PROT_EXEC),
-R5 (CPython uprobe ⇒ a frame from this source file was evaluated). R3 (network
-behavior) is P6; R4 (static-taint cross-ref) lives in verdict_integration.
+R5 (CPython uprobe ⇒ a frame from this source file was evaluated), R6 (JVM
+class__loaded ⇒ a class from this package was resolved). R3 (network behavior)
+is P6; R4 (static-taint cross-ref) lives in verdict_integration.
 """
 from __future__ import annotations
 
@@ -141,6 +142,31 @@ def correlate_opens(events: list[dict], index: PackageIndex,
         pr.verdict = CONFIRMED_REACHABLE
         # Keep both when a package has native *and* interpreted execution.
         pr.rule = "R2+R5" if pr.rule in ("R2", "R2+R5") else "R5"
+        pr.hit_count += 1
+
+    # Pass 4 — R6 (Tier B, Java): the JVM loaded a class from this package.
+    #
+    # Stronger than the Python equivalent by construction: the JVM resolves a
+    # class on *first active use*, so a class load is already evidence the code
+    # was needed, not merely that a file was present. The same traffic boundary
+    # still applies — classes loaded while wiring up the app at boot are startup
+    # work; classes loaded once requests are flowing were needed to serve them.
+    for ev in events:
+        if ev.get("type") != "java_class":
+            continue
+        cls = ev.get("filename") or ""
+        if not cls or cls.startswith("/"):
+            continue
+        entry = index.match(cls)
+        if entry is None:
+            continue  # JDK built-ins (java/*, jdk/*, sun/*) own no package
+        if traffic_start_ns is not None and (ev.get("ts_ns") or 0) < traffic_start_ns:
+            pr = _touch(entry, cls, POTENTIALLY_REACHABLE, "R1")
+            pr.hit_count += 1
+            continue
+        pr = _touch(entry, cls, CONFIRMED_REACHABLE, "R6")
+        pr.verdict = CONFIRMED_REACHABLE
+        pr.rule = "R6"
         pr.hit_count += 1
 
     return reached
