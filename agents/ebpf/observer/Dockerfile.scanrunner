@@ -3,7 +3,9 @@
 # _run_observer_mode against a real target app on a Linux (host-networked) box.
 FROM vulnreach-observer-test
 
+# schemathesis version MUST match requirements.txt (4.x CLI: --url/--max-examples;
+# pinning <4 gives the 3.x CLI and every run fails with rc=2).
 RUN pip install --no-cache-dir --break-system-packages \
       aiohttp \
       pyyaml \
-      "schemathesis<4"
+      "schemathesis==4.11.0"

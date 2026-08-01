@@ -83,7 +83,7 @@ Validated result: 6 LIKELY (Flask, requests, PyYAML, Jinja2, Werkzeug, urllib3 �
 imported at startup) vs 5 NOT_OBSERVED (lxml, cryptography, SQLAlchemy, PyJWT,
 Pillow — installed but never loaded).
 
-**Known issue:** the agent's `_run_schemathesis` uses `--url`/`--max-examples`,
-removed in schemathesis ≥3.36 (now `--base-url`/`--hypothesis-max-examples`) → rc=2.
-Pre-existing (also affects legacy coverage mode). The observer still captures the
-interpreter's startup imports, so reachability is reported regardless of traffic.
+**Note:** the scan-runner must install `schemathesis==4.11.0` (same pin as
+`requirements.txt`). The agent's `--url`/`--max-examples` are 4.x flags; installing
+`schemathesis<4` yields the 3.x CLI (`--base-url`/`--hypothesis-max-examples`) and
+every run fails with rc=2 — a harness misconfiguration, not a product bug.
