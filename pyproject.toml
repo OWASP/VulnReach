@@ -49,3 +49,17 @@ include = [
     "storage*",
     "vulnreach*",
 ]
+
+# Coverage exclusions live here rather than on the pytest command line: the CI
+# job passed `--cov-omit=...`, which is not a pytest-cov option and never has
+# been (checked against 2.12.1 through 7.1.0). pytest rejected it during
+# argument parsing, so the `--cov-fail-under=60` gate in that job has never
+# actually run. coverage.py reads this section itself, so the exclusions apply
+# to every invocation rather than only the one that remembers the flag.
+[tool.coverage.run]
+omit = [
+    "labs/*",
+    "tests/*",
+    "*/__pycache__/*",
+    "*.pyc",
+]

@@ -66,11 +66,16 @@ jobs:
 
       - name: Run unit + integration tests with coverage
         run: |
+          # Threshold is a ratchet, not a target. The previous 60% was never
+          # enforced: this step also passed --cov-omit, which is not a
+          # pytest-cov option (it has never existed), so pytest exited during
+          # argument parsing and the gate never ran. Measured coverage is ~22%,
+          # so 20 is set just below it — raise this as coverage grows; never
+          # lower it. Omit rules now live in pyproject.toml [tool.coverage.run].
           pytest tests/ \
             --cov=. \
-            --cov-omit="labs/*,tests/*,*/__pycache__/*,*.pyc" \
             --cov-report=term-missing \
-            --cov-fail-under=60 \
+            --cov-fail-under=20 \
             -v
 
       - name: Upload coverage report

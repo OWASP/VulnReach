@@ -37,8 +37,21 @@ _DOCKER = shutil.which("docker") is not None
 _BIN = os.environ.get("VULNREACH_OBSERVER_BIN", _DEFAULT_BIN)
 _HAVE_BIN = os.path.exists(_BIN)
 
+_RUNNABLE = _LINUX and _ROOT and _DOCKER and _HAVE_BIN
+
+# In CI a silently-skipped suite is a *green* suite — the whole point of running
+# it there is defeated if a missing binary or a non-root runner just skips 14
+# tests and reports success. VULNREACH_EBPF_REQUIRE=1 turns "cannot run" into a
+# hard collection error, so CI must either genuinely execute these or go red.
+if os.environ.get("VULNREACH_EBPF_REQUIRE") == "1" and not _RUNNABLE:
+    raise RuntimeError(
+        "VULNREACH_EBPF_REQUIRE=1 but the observer suite cannot run: "
+        f"linux={_LINUX} root={_ROOT} docker={_DOCKER} "
+        f"binary={_HAVE_BIN} ({_BIN})"
+    )
+
 pytestmark = pytest.mark.skipif(
-    not (_LINUX and _ROOT and _DOCKER and _HAVE_BIN),
+    not _RUNNABLE,
     reason="needs Linux+root+docker+built observer binary (run in the node-agent container)",
 )
 

@@ -1,4 +1,10 @@
+//go:build ignore
+
 // VulnReach eBPF observer — Tier A baseline.
+//
+// The build tag above is for the *Go* toolchain, not for clang: without it
+// `go vet ./...` and `go test ./...` refuse the package outright ("C source
+// files not allowed when not using cgo"). clang reads it as a plain comment.
 //
 // CO-RE programs, all filtered in-kernel by cgroup id, emitting fixed-layout
 // `struct event` records to one ring buffer for the Go loader to marshal into
