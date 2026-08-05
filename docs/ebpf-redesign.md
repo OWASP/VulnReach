@@ -174,11 +174,37 @@ Two findings changed the plan from what §8/P8 originally assumed:
    degrade to R1. On `labs/python_vuln_app` this separates the 10 packages that
    execute per request from the 6 that merely load at boot.
 
+3. **The probe is expensive, and the dedupe does not make it cheap.** The in-kernel
+   dedupe suppresses ringbuf *writes*, not the trap — while attached, every eligible
+   call pays ~2µs against a ~40ns Python call. Measured (`e2e/bench_uprobe.py`):
+
+   | CPython | micro (ns/call, C→Python) | real Flask request latency | throughput |
+   |---------|--------------------------|----------------------------|------------|
+   | 3.8–3.10 | 51 → 2100–2960 | **11.4×** (3.9: 2.0ms → 22.8ms) | 437 → 41 rps |
+   | 3.11–3.13 | 39 → 2030–2070 | **2.6×** (3.11: 1.25ms → 3.2ms) | 700 → 287 rps |
+
+   The split is CPython's 3.11 frame inlining: `CALL` pushes the new frame inside the
+   *same* eval-loop invocation, so Python→Python calls stop trapping (measured
+   +1.4–3.2ns, i.e. nothing) and only C→Python transitions remain. Below 3.11 every
+   call re-enters `_PyEval_EvalFrameDefault` and traps.
+
+   An 11× latency hit on the target would change what the DAST fuzzer explores and
+   could trip its timeouts — it breaks the "Tier B may only ever *add* signal"
+   constraint. **Mitigation: bound the exposure in time, not by sampling.** R5 needs
+   each source file to execute *once* while we listen, and a served request path
+   repeats constantly, so `--tier-b-window` attaches at `mark` and detaches after N
+   seconds. Validated on Flask 3.9 and 3.11: the R5 package set is **identical** with
+   a 5s window, post-detach latency returns to 1.0×, and the cost over a 20s window
+   drops from 90% to 17% of throughput. Sampling was rejected as the alternative: it
+   would bias recall against exactly the rarely-executed code R5 is most useful for.
+
 Implementation notes: struct offsets are version-keyed and pushed into a BPF map at
 attach (the frame arg changed type in 3.11, moved in 3.12, and `PyASCIIObject` shrank
-in 3.12), so one program covers 3.8–3.13. The probe fires on every Python call, so the
-kernel side dedupes by `co_filename` pointer; an epoch in the dedupe key (bumped over
-the observer's stdin at `mark`) lets a file be reported once more during traffic.
+in 3.12), so one program covers 3.8–3.13 — **all six branches validated live**
+(attach + `co_filename` decoded on 3.8/3.9/3.10/3.11/3.12/3.13). The probe fires on
+every Python call, so the kernel side dedupes by `co_filename` pointer; an epoch in the
+dedupe key (bumped over the observer's stdin at `mark`) lets a file be reported once
+more during traffic.
 
 ### 5.4c Rule R6 — JVM class loaded *(implemented, P8 — Tier B, Java)*
 Java is where the redesign's original USDT plan actually holds. Stock JDK images ship
@@ -301,7 +327,7 @@ LLM**. Enrichment (Phase 8) is where the old rich logic returns.
 | **P5 — Verdict integration** | New enum, mapping table (§6), wire into `correlate_coverage`; legacy-alias shim. | Unit-test each evidence combo → expected verdict/confidence; dashboard consumes without breaking. |
 | **P6 — `net_connect`/`net_io` + Rule R3** | Behavioral corroboration with deterministic port/protocol table. | Container making a DB connect; assert R3 corroborates the driver package only when loaded. |
 | **P7 — Static-taint cross-ref (R4)** ✅ | `taint_modules()` + canonical `dynamic_reachability_verdict()` in `verdict_integration.py`; `taint_flows` threaded from `ScanContext`. | `test_taint_crossref_r4_confirmed` (LIKELY→CONFIRMED 0.9 with taint), `test_taint_only_is_possible`; full-scan e2e on `labs/python_vuln_app` with real `findings.json` flows. |
-| **P8 — Tier B enrichment (Rules R5 Python / R6 Java)** ✅ | cgroup-scoped **uprobe** on `_PyEval_EvalFrameDefault` (not USDT — see §5.4b), version-keyed offsets, in-kernel dedupe + traffic epoch; best-effort attach; **baseline unaffected if it fails**. | `test_interpreted_exec_r5_confirmed` (A/B: same workload is LIKELY without Tier B, CONFIRMED with it), `test_tier_b_failure_preserves_baseline` (bogus lib → observer still ready, Tier A intact), `test_r5_traffic_boundary_separates_import_from_use` (import-only stays LIKELY), `test_java_class_load_r6_confirmed` (two jars on the classpath, only the used one reaches CONFIRMED). |
+| **P8 — Tier B enrichment (Rules R5 Python / R6 Java)** ✅ | cgroup-scoped **uprobe** on `_PyEval_EvalFrameDefault` (not USDT — see §5.4b), version-keyed offsets, in-kernel dedupe + traffic epoch; best-effort attach; **baseline unaffected if it fails**; **time-boxed** (`--tier-b-window`, default 5s from `mark`) because the probe costs 2.6x-11.4x request latency while attached (§5.4b). | `test_interpreted_exec_r5_confirmed` (A/B: same workload is LIKELY without Tier B, CONFIRMED with it), `test_tier_b_failure_preserves_baseline` (bogus lib → observer still ready, Tier A intact), `test_r5_traffic_boundary_separates_import_from_use` (import-only stays LIKELY), `test_java_class_load_r6_confirmed` (two jars on the classpath, only the used one reaches CONFIRMED), `test_tier_b_uprobe_window_detaches` (no py_call events after the window, with an unbounded control run so it cannot pass vacuously). Perf + all six version branches validated by `e2e/bench_uprobe.py`. |
 | **P9 — containerd/CRI resolver + node DaemonSet** (if D2 says in-scope) | Second `TargetResolver` impl; DaemonSet lifecycle. | K8s kind cluster: DaemonSet attaches to a scanned pod, same programs, same output. |
 
 Sequencing note: **P1→P2 is the MVP** — a language-agnostic baseline that already beats today's

@@ -48,6 +48,17 @@ def observer_available(binary_path: str = _DEFAULT_BIN) -> tuple[bool, str]:
     return True, "ok"
 
 
+# How long the CPython uprobe stays live once traffic starts. Measured cost of
+# staying attached (agents/ebpf/observer/e2e/bench_uprobe.py, Docker Desktop
+# 6.12 arm64): median Flask request latency 2.9x on CPython 3.11+, 10.1x on
+# <=3.10 — on 3.11+ the eval loop inlines Python->Python calls so only C->Python
+# transitions trap, while every call traps below that. Rule R5 only needs each
+# source file to execute once while we listen, and a served request path repeats
+# constantly, so a few seconds of traffic yields the same evidence at a small
+# fraction of the cost. 0 disables the bound (attached until the run ends).
+_DEFAULT_TIER_B_WINDOW = int(os.environ.get("VULNREACH_EBPF_TIER_B_WINDOW", "5"))
+
+
 class TrafficWindow:
     """Marks the boot→traffic boundary for Rule R5.
 
@@ -134,6 +145,7 @@ async def run_observer_reachability(
     binary_path: Optional[str] = None,
     traffic: Optional[Callable[[], Awaitable[None]]] = None,
     window: Optional["TrafficWindow"] = None,
+    tier_b_window: int = _DEFAULT_TIER_B_WINDOW,
 ) -> tuple[list[ReachabilityFinding], dict[str, Any]]:
     """Observe *container_ref* over a window and return (findings, metadata).
 
@@ -151,6 +163,8 @@ async def run_observer_reachability(
         window:          optional TrafficWindow; ``traffic`` should call
                          ``window.mark()`` once the app is healthy so Rule R5 can
                          tell request-handling code from boot-time imports.
+        tier_b_window:   seconds to keep the CPython uprobe live after the mark
+                         (0 = whole run). See ``_DEFAULT_TIER_B_WINDOW``.
     """
     resolver = DockerTargetResolver()
     target = resolver.resolve(container_ref)
@@ -164,7 +178,8 @@ async def run_observer_reachability(
     # recording — every millisecond before attach is a startup import we miss.
     client = ObserverClient(binary_path or _DEFAULT_BIN)
     ready = await client.start([target.cgroup_id], duration=duration,
-                               python_lib=libpython, jvm_lib=libjvm)
+                               python_lib=libpython, jvm_lib=libjvm,
+                               tier_b_window=tier_b_window)
     progs = ready.get("progs") or []
     tier_b = "uprobe:py_eval_frame" in progs or "uprobe:jvm_class_loaded" in progs
     if window is not None and tier_b:
@@ -201,7 +216,8 @@ async def run_observer_reachability(
         "code_executed": sorted({pr.name for pr in reach.values()
                                  if "R5" in pr.rule or "R6" in pr.rule}),
         "tier_b": {"enabled": tier_b, "libpython": libpython, "libjvm": libjvm,
-                   "traffic_start_ns": window.start_ns if window else None},
+                   "traffic_start_ns": window.start_ns if window else None,
+                   "uprobe_window_s": tier_b_window},
         "taint_modules": sorted(_taint_modules(taint_flows)),
     }
     return findings, metadata

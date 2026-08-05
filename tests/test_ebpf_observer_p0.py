@@ -14,6 +14,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 import uuid
 
 import pytest
@@ -492,6 +493,60 @@ def test_r5_traffic_boundary_separates_import_from_use(py_app_container):
     # Same events without the boundary: tabulate would be indistinguishable.
     naive = correlate_opens(events, index)
     assert naive["python:tabulate"].verdict == CONFIRMED_REACHABLE
+
+
+def test_tier_b_uprobe_window_detaches(py_app_container):
+    """The Tier B uprobe must not stay attached for the whole run.
+
+    A uprobe on the eval loop costs ~2us per trap, measured at 2.6x (CPython
+    3.11) to 11.4x (3.9) on real Flask request latency — see
+    observer/e2e/bench_uprobe.py. ``tier_b_window`` bounds that: the probe goes
+    live at the traffic mark and detaches afterwards, which the benchmark shows
+    yields the same R5 package set.
+
+    Asserted behaviourally: after the window elapses, a fresh workload produces
+    no py_call events. The second ``mark`` is essential — it bumps the dedupe
+    epoch, so without a real detach the same files *would* be reported again and
+    this test would pass vacuously.
+    """
+    rt = DockerTargetResolver().resolve(py_app_container)
+    lib = find_libpython(f"/proc/{rt.init_pid}/root")
+    assert lib is not None
+    call = ["python", "-c", "import requests; requests.utils.default_headers()"]
+
+    async def go(tier_b_window):
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=30, python_lib=lib,
+                           tier_b_window=tier_b_window)
+        collector = asyncio.create_task(client.collect())
+        try:
+            await asyncio.sleep(1.0)
+            client.mark()                      # epoch 1 — arms the window
+            await _docker_exec(py_app_container, *call)
+            await asyncio.sleep(2.5)           # 1s window elapses -> detach
+            boundary = time.monotonic_ns()
+            client.mark()                      # epoch 2 — clears the dedupe
+            await asyncio.sleep(0.3)
+            await _docker_exec(py_app_container, *call)
+            await asyncio.sleep(0.5)
+        finally:
+            await client.stop()
+        events = await collector
+        after = [e for e in events
+                 if e.get("type") == "py_call" and (e.get("ts_ns") or 0) > boundary]
+        before = [e for e in events
+                  if e.get("type") == "py_call" and (e.get("ts_ns") or 0) <= boundary]
+        return before, after
+
+    # Control: unbounded — the probe is still live, so the post-mark workload
+    # is observed again. This is what proves the assertion below is not vacuous.
+    before, after = asyncio.run(go(0))
+    assert before, "no py_call events at all — Tier B never worked"
+    assert after, "unbounded Tier B should still report after a second mark"
+
+    before, after = asyncio.run(go(1))
+    assert before, "no py_call events while the window was open"
+    assert not after, f"uprobe still live {len(after)} events after the window: {after[:3]}"
 
 
 _JAVA_IMAGE = os.environ.get("VULNREACH_JAVA_FIXTURE", "vulnreach-java-fixture")

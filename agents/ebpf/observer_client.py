@@ -36,13 +36,19 @@ class ObserverClient:
     async def start(self, cgroup_ids: list[int], duration: int = 0,
                     ready_timeout: float = 10.0,
                     python_lib: Optional[str] = None,
-                    jvm_lib: Optional[str] = None) -> dict[str, Any]:
+                    jvm_lib: Optional[str] = None,
+                    tier_b_window: int = 0) -> dict[str, Any]:
         """Spawn the observer and return the parsed ``ready`` line.
 
         ``python_lib`` / ``jvm_lib`` enable Tier B enrichment (the CPython uprobe
         for Rule R5, the JVM class__loaded USDT probe for Rule R6).
         It is best-effort: an unusable path makes the observer emit a ``warn``
         and carry on with the Tier A baseline, never an ``error``.
+
+        ``tier_b_window`` bounds how long the CPython uprobe stays attached after
+        :meth:`mark` (0 = until exit). The uprobe traps on every eval-frame entry
+        at ~2us a time, so leaving it attached for a whole DAST run multiplies
+        request latency; R5 only needs each file to execute once while we listen.
 
         Raises ObserverError if the binary emits an ``error`` line, dies before
         ``ready``, or does not become ready within ``ready_timeout`` seconds.
@@ -59,6 +65,8 @@ class ObserverClient:
             args += ["--python-lib", python_lib]
         if jvm_lib:
             args += ["--jvm-lib", jvm_lib]
+        if tier_b_window:
+            args += ["--tier-b-window", str(tier_b_window)]
 
         self._proc = await asyncio.create_subprocess_exec(
             *args,
@@ -122,7 +130,7 @@ class ObserverClient:
                 return
             if t == "error":
                 raise ObserverError(f"observer error mid-stream: {line.get('msg')}")
-            if t in ("warn", "marked"):
+            if t in ("warn", "marked", "tierb_detached"):
                 continue  # control lines, not events
             yield line
 

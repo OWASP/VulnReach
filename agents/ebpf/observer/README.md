@@ -45,6 +45,29 @@ Pass `--python-lib <host-visible path to libpython>` to attach a uprobe on
 - **Volume control.** The probe fires on every Python call. The kernel side
   dedupes by `co_filename` pointer, so a run emits a few hundred events instead
   of millions.
+- **Cost — and why `--tier-b-window` exists.** The dedupe suppresses ringbuf
+  *writes*, not the trap: while attached, every eligible call still pays ~2µs
+  against a ~40ns Python call. Measured on real Flask request latency
+  (`e2e/bench_uprobe.py`, Docker Desktop 6.12 arm64):
+
+  | CPython | latency, probe attached | throughput | why |
+  |---------|------------------------|------------|-----|
+  | 3.9 (≤3.10) | **11.4×** (2.0ms → 22.8ms) | 437 → 41 rps | every call re-enters the eval loop |
+  | 3.11 (3.11+) | **2.6×** (1.25ms → 3.2ms) | 700 → 287 rps | CALL inlines Python→Python frames; only C→Python traps |
+
+  Leaving it attached for a whole DAST run would distort the very traffic it is
+  measuring. `--tier-b-window <secs>` goes live at `mark` and detaches after the
+  window; R5 only needs each file to execute *once* while we listen, and a
+  served request path repeats constantly. Validated: with a 5s window the R5
+  package set is **identical** (`blinker, flask, gunicorn, werkzeug, yaml`),
+  latency after detach returns to 1.0×, and the 20s run costs 17% throughput on
+  3.9 instead of 90%. `observer_runner` defaults to 5s
+  (`VULNREACH_EBPF_TIER_B_WINDOW`); the binary defaults to 0 (unbounded) so raw
+  CLI use is unchanged. The window is anchored to `mark`, not attach, because an
+  app can take tens of seconds to become healthy — a caller that never marks
+  keeps the probe for the whole run.
+- **Java needs no window.** The JVM resolves each class once, so `class__loaded`
+  fires ~1.3k times per run (~3ms total), not per call.
 - **Boot vs traffic.** Importing a package runs plenty of its own code, so "a
   frame executed" alone is barely stricter than R1. `TrafficWindow.mark()`
   (called once the target is healthy) writes `mark` to the observer's stdin,

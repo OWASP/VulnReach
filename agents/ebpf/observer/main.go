@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -207,6 +208,7 @@ func main() {
 	pythonLib := flag.String("python-lib", "", "host-visible path to the target's libpython (Tier B enrichment; best-effort)")
 	pythonVersion := flag.String("python-version", "", "target CPython version e.g. 3.11 (default: inferred from --python-lib)")
 	jvmLib := flag.String("jvm-lib", "", "host-visible path to the target's libjvm.so (Java Tier B; best-effort)")
+	tierBWindow := flag.Int("tier-b-window", 0, "seconds to keep the CPython uprobe live after `mark` (0 = until exit)")
 	flag.Parse()
 
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -256,8 +258,29 @@ func main() {
 
 	progs := []string{"sched_process_exec", "sys_enter_openat", "sys_enter_openat2", "sys_enter_mmap"}
 	if lk, ok := attachPython(&objs, *pythonLib, *pythonVersion); ok {
-		defer lk.Close()
 		progs = append(progs, "uprobe:py_eval_frame")
+
+		// A uprobe on the eval loop is expensive: the trap costs ~2us against a
+		// ~40ns Python call, measured 2.9x-10x on real Flask request latency
+		// (e2e/bench_uprobe.py). The in-kernel dedupe suppresses ringbuf writes,
+		// not the trap, so the cost is paid for as long as we stay attached.
+		//
+		// Rule R5 only needs each source file to run *once* while we are
+		// listening, and a served request path repeats constantly, so staying
+		// attached for the whole window buys almost no extra evidence at
+		// several times the cost. --tier-b-window bounds the exposure: go live
+		// at the traffic mark, then detach.
+		var pyOnce sync.Once
+		markedAt := time.Now()
+		closePy := func(reason string) {
+			pyOnce.Do(func() {
+				lk.Close()
+				emit(map[string]any{"v": 1, "type": "tierb_detached", "reason": reason,
+					"live_ms": time.Since(markedAt).Milliseconds()})
+			})
+		}
+		defer closePy("shutdown")
+
 		// Control channel: a "mark" line on stdin bumps the Tier B dedupe epoch.
 		// Almost every package executes during import, so without this the
 		// per-file dedupe would permanently mask the request-handling frames we
@@ -276,6 +299,17 @@ func main() {
 					continue
 				}
 				emit(map[string]any{"v": 1, "type": "marked", "epoch": epoch})
+				// The window is deliberately anchored to the mark, not to
+				// attach: the caller that knows when traffic starts is the same
+				// one that marks, and an app can take tens of seconds to become
+				// healthy. A caller that never marks (raw CLI use, tests) keeps
+				// the current attached-until-exit behaviour.
+				if *tierBWindow > 0 && epoch == 1 {
+					markedAt = time.Now()
+					time.AfterFunc(time.Duration(*tierBWindow)*time.Second, func() {
+						closePy("window_elapsed")
+					})
+				}
 			}
 		}()
 	}
