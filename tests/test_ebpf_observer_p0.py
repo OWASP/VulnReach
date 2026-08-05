@@ -549,6 +549,64 @@ def test_tier_b_uprobe_window_detaches(py_app_container):
     assert not after, f"uprobe still live {len(after)} events after the window: {after[:3]}"
 
 
+_NODE_IMAGE = os.environ.get("VULNREACH_NODE_FIXTURE", "vulnreach-node-fixture")
+
+
+@pytest.fixture()
+def node_app_container():
+    name = f"vr_node_{uuid.uuid4().hex[:8]}"
+    _run("docker", "run", "-d", "--name", name, _NODE_IMAGE, "sleep", "600")
+    try:
+        yield name
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_node_reach_r1_and_nested_node_modules(node_app_container):
+    """Rule R1 for Node, and the nested-node_modules attribution regression.
+
+    npm nests a dependency precisely when its version disagrees with the hoisted
+    one. An index that stops descending at the first `node_modules` never sees
+    the nested copy, so its files fall to the enclosing package by longest-prefix
+    match and the report names the wrong package at the wrong version.
+
+    The fixture makes that unambiguous: `used` requires `nested`, resolving to
+    the NESTED nested@2.0.0, while a hoisted nested@1.0.0 also exists and is
+    never touched. Verified independently — `node app.js` prints "used+nested2".
+    """
+    rt = DockerTargetResolver().resolve(node_app_container)
+    root = f"/proc/{rt.init_pid}/root"
+    index = build_index(root, ecosystems=("node",))
+
+    prefixes = [e.path_prefix for e in index.entries()]
+    assert any(p.endswith("/used/node_modules/nested/") for p in prefixes), \
+        f"nested node_modules not indexed: {sorted(prefixes)}"
+
+    async def drive():
+        client = ObserverClient(_BIN)
+        await client.start([rt.cgroup_id], duration=10)
+        collector = asyncio.create_task(client.collect())
+        try:
+            await asyncio.sleep(1.0)
+            await _docker_exec(node_app_container, "node", "/app/app.js")
+            await asyncio.sleep(0.5)
+        finally:
+            await client.stop()
+        return await collector
+
+    reach = correlate_opens(asyncio.run(drive()), index)
+    reached = {pr.name for pr in reach.values()}
+
+    assert "used" in reached, f"required package not reached: {sorted(reached)}"
+    assert "nested" in reached, \
+        "nested dependency missing — its files were attributed to the parent"
+    # The version is the whole point: 1.0.0 here means we matched the hoisted
+    # copy, which node demonstrably did not load.
+    assert reach["node:nested"].version == "2.0.0", \
+        f"attributed to the hoisted copy, not the nested one: {reach['node:nested']}"
+    assert "unused" not in reached, "installed-but-never-required package shows reached"
+
+
 _JAVA_IMAGE = os.environ.get("VULNREACH_JAVA_FIXTURE", "vulnreach-java-fixture")
 
 

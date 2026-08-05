@@ -85,11 +85,20 @@ def _strip_root(container_root: str, path: str) -> str:
     return path
 
 
-def _find_dirs(container_root: str, names: tuple[str, ...], max_depth: int) -> list[str]:
+def _find_dirs(container_root: str, names: tuple[str, ...], max_depth: int,
+               descend_into_match: bool = False) -> list[str]:
     """Bounded search for directories whose basename is in *names*.
 
-    Prunes noisy trees and does not descend into a matched dir (children are
-    enumerated separately by the caller).
+    Prunes noisy trees and, by default, does not descend into a matched dir
+    (children are enumerated separately by the caller).
+
+    ``descend_into_match`` keeps walking *through* a match, which npm requires:
+    when a dependency's version conflicts with the hoisted one, npm installs it
+    into a **nested** ``node_modules`` inside the parent package. Stopping at the
+    first match leaves those packages out of the index entirely, and because the
+    matcher is longest-prefix their files are then silently attributed to the
+    enclosing package — under the enclosing package's *version*, which is
+    precisely the version that nesting exists to disagree with.
     """
     root = container_root.rstrip("/")
     base_depth = root.count("/")
@@ -102,7 +111,8 @@ def _find_dirs(container_root: str, names: tuple[str, ...], max_depth: int) -> l
         dirs[:] = [d for d in dirs if d not in _PRUNE_DIRS]
         if os.path.basename(dirpath) in names:
             found.append(dirpath)
-            dirs[:] = []  # don't descend into the package root itself
+            if not descend_into_match:
+                dirs[:] = []  # don't descend into the package root itself
     return found
 
 
@@ -158,8 +168,16 @@ def _node_entry(container_root: str, full: str, name: str) -> PackageEntry:
 
 
 def build_node(container_root: str, max_depth: int = 12) -> list[PackageEntry]:
+    """Index every node_modules dir, including the nested ones npm creates.
+
+    Nested installs are not an edge case: OWASP Juice Shop's image carries 78 of
+    them holding 195 packages (~24% of its tree). They must be indexed in their
+    own right — the longest-prefix matcher then attributes their files to them
+    rather than to the package they happen to sit inside.
+    """
     entries: list[PackageEntry] = []
-    for nm in _find_dirs(container_root, ("node_modules",), max_depth):
+    for nm in _find_dirs(container_root, ("node_modules",), max_depth,
+                         descend_into_match=True):
         try:
             children = os.listdir(nm)
         except OSError:
