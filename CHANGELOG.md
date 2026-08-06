@@ -1,5 +1,61 @@
 # Changelog
 
+## [Unreleased] — 2026-08-06
+
+### Fixed
+
+#### Static Python reachability — the call graph had been dead for seven months
+- **`agents/reachability/python_call_graph.py`, `dependency_tree_analyzer.py`** — moved into the
+  package from `agents/utils/`. When `agents/reachability/` was created (2026-01-02, `667e355`) the
+  Java and JavaScript call graphs moved with it but the Python ones did not, so
+  `from .python_call_graph import PythonCallGraphBuilder` resolved to nothing. Both imports sat
+  behind a bare `except ImportError`, so instead of failing they silently set `HAS_CALL_GRAPH=False`
+  and `HAS_DEP_TREE_ANALYZER=False`. **Consequence: `call_chain_exists` and `sink_reachable` were
+  always False for Python, no static finding could reach CONFIRMED, and transitive dependency
+  detection never ran.** Verified against `labs/python_vuln_app`: static recall was 2 of 6 packages
+  that eBPF observed loading.
+- **PyPI name → import name resolution** — `find_package_usage` matched source imports against the
+  raw distribution name, so `PyYAML` never matched `import yaml`, `Pillow` never matched
+  `from PIL import Image`, `beautifulsoup4` never matched `import bs4`. The resolver
+  (`agents/utils/import_resolver.py`) already existed and was already used by TainterAgent and
+  DynamicReachabilityAgent — static reachability simply never called it. On the project's own demo
+  app this scored **PyYAML as NOT_OBSERVED at confidence 0.1**, advising users to ignore a reachable
+  `yaml.load` on request data; it now scores CONFIRMED 0.95. New
+  `PythonReachabilityAnalyzer.candidate_module_names()`; the analyzer also accepts `import_map` so
+  MetadataAgent's per-app discoveries layer over the curated table.
+- **Findings no longer contradict themselves** — the verdict and the reported evidence were computed
+  from different values, so a finding could report `verdict=LIKELY` (which `correlation.engine`
+  defines as import + call chain) beside `call_chain_exists=False`. Both now derive from one set of
+  booleans. Import-only correctly reports **POSSIBLE** rather than LIKELY.
+- **CONFIRMED now requires taint evidence** — `sink_reachable` was set to `bool(call_chain_graph)`,
+  conflating "a call chain reaches this package" with "the vulnerable sink is reachable", which made
+  every used package CONFIRMED 0.95 and could not distinguish `yaml.safe_load` from `yaml.load`. It
+  now requires a static taint path into the package's module, mirroring Rule R4 on the eBPF side.
+  `TainterAgent` is sequenced before the parallel static stage in `agents/runner.py` — run
+  concurrently it was a race that would have left `context.taint_flows` empty.
+- **Unbounded subprocesses in `dependency_tree_analyzer`** — all six package-manager calls
+  (`pipdeptree`, `npm ls --all`, `composer show`, `go mod graph`, `dotnet list`) ran with **no
+  timeout** against untrusted repository content, several of which reach the network. All are now
+  bounded. The `_has_pipdeptree()` probe shelled out to `pipdeptree --version`, measured at **over
+  180 seconds** against a large global site-packages — the probe, not the query, was the hang; it now
+  uses `shutil.which`. The pip dependency tree is cached per analyzer instance instead of being
+  rebuilt once per vulnerable package. Re-enabling transitive analysis without these hung a scan of a
+  3-file app; the same scan now completes in **0.7s**.
+- **macOS temp directories were refused** — the system-directory guard rejected any path under
+  `/var`, but `tempfile.gettempdir()` resolves to `/private/var/folders/...` on macOS, so the
+  analyzer refused to scan any temporary workdir there. The OS temp root is now exempted.
+
+### Added
+
+- **`tests/test_static_reachability.py`** — 14 unit tests (no Docker, no root, so they run in normal
+  CI). Covers the regression directly: `test_optional_analysis_modules_are_actually_importable`
+  asserts `HAS_CALL_GRAPH`/`HAS_DEP_TREE_ANALYZER` are True, which is the check that would have
+  caught the seven-month outage. Also covers distribution→import name bridging, the full verdict
+  gradation (CONFIRMED / LIKELY / POSSIBLE / NOT_OBSERVED), and that reported evidence always agrees
+  with the verdict. This path previously had no test coverage at all.
+
+---
+
 ## [Unreleased] — 2026-05-19
 
 ### Added

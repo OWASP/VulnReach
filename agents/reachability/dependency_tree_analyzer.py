@@ -7,10 +7,19 @@ Utilities to detect transitive/indirect dependencies across different package ma
 
 import os
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, Set, List, Optional, Tuple
 from dataclasses import dataclass
+
+# Every helper here shells out to a package manager (pipdeptree, npm, composer,
+# go, dotnet) inside a *scanned repository*, and several of them will reach the
+# network to resolve a tree. None of these calls had a timeout, so a slow or
+# hostile repo could wedge a scan indefinitely — which is exactly what happened
+# when transitive analysis was re-enabled. Bound them all.
+_SUBPROCESS_TIMEOUT = 60
+_PIPDEPTREE_TIMEOUT = 30
 
 
 @dataclass
@@ -101,17 +110,33 @@ class PythonDependencyTreeAnalyzer(DependencyTreeAnalyzer):
         return declared
 
     def get_dependency_tree_from_pip(self) -> Dict[str, List[str]]:
-        """Get dependency tree using pip show"""
+        """Get dependency tree using pip show (cached per analyzer instance).
+
+        Cached because `get_dependency_info` is called once per vulnerable
+        package and each call previously re-ran pipdeptree from scratch — N
+        packages meant N full subprocess runs of the single most expensive
+        operation in this module.
+        """
+        cached = getattr(self, "_pip_tree_cache", None)
+        if cached is not None:
+            return cached
+
         dependency_tree = {}
 
         try:
             # Try to use pipdeptree if available
             if self._has_pipdeptree():
+                # Timeout is mandatory, not defensive: pipdeptree imports every
+                # installed distribution to build the tree, so on a large
+                # environment it can take minutes or wedge outright. This ran
+                # without one, and re-enabling transitive analysis hung a scan
+                # of a 3-file app until it was added.
                 result = subprocess.run(
                     ['pipdeptree', '--json'],
                     capture_output=True,
                     text=True,
-                    cwd=self.project_root
+                    cwd=self.project_root,
+                    timeout=_PIPDEPTREE_TIMEOUT,
                 )
 
                 if result.returncode == 0:
@@ -123,21 +148,24 @@ class PythonDependencyTreeAnalyzer(DependencyTreeAnalyzer):
                             dependencies.append(self._normalize_package_name(dep['package_name']))
                         dependency_tree[pkg_name] = dependencies
 
+                    self._pip_tree_cache = dependency_tree
                     return dependency_tree
         except Exception as e:
             print(f"Warning: Could not get pip dependency tree: {e}")
 
+        self._pip_tree_cache = dependency_tree
         return dependency_tree
 
     def _has_pipdeptree(self) -> bool:
-        """Check if pipdeptree is installed"""
-        try:
-            result = subprocess.run(['pipdeptree', '--version'],
-                                  stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL)
-            return result.returncode == 0
-        except FileNotFoundError:
-            return False
+        """Check whether pipdeptree is available, without executing it.
+
+        `pipdeptree --version` is not a cheap probe: pipdeptree walks the whole
+        environment on startup, and against a large global site-packages the
+        *version check alone* was measured at over 180 seconds — the probe, not
+        the query, was what hung scans. shutil.which answers the same question
+        from PATH with no subprocess at all.
+        """
+        return shutil.which('pipdeptree') is not None
 
     def get_dependency_info(self, package_name: str) -> Optional[DependencyInfo]:
         """Get information about a specific Python package"""
@@ -240,7 +268,8 @@ class JavaScriptDependencyTreeAnalyzer(DependencyTreeAnalyzer):
                 ['npm', 'ls', '--json', '--all'],
                 capture_output=True,
                 text=True,
-                cwd=self.project_root
+                cwd=self.project_root,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             if result.stdout:
@@ -382,7 +411,8 @@ class PHPDependencyTreeAnalyzer(DependencyTreeAnalyzer):
                 ['composer', 'show', '--tree', '--format=json'],
                 capture_output=True,
                 text=True,
-                cwd=self.project_root
+                cwd=self.project_root,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             if result.stdout:
@@ -516,7 +546,8 @@ class GoDependencyTreeAnalyzer(DependencyTreeAnalyzer):
                 ['go', 'mod', 'graph'],
                 capture_output=True,
                 text=True,
-                cwd=self.project_root
+                cwd=self.project_root,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             if result.returncode == 0:
@@ -638,7 +669,8 @@ class CSharpDependencyTreeAnalyzer(DependencyTreeAnalyzer):
                 ['dotnet', 'list', 'package', '--include-transitive'],
                 capture_output=True,
                 text=True,
-                cwd=self.project_root
+                cwd=self.project_root,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             if result.returncode == 0:

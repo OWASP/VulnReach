@@ -128,8 +128,22 @@ class AgentRunner:
                 "agent_skipped",
             ),
         }
-        if python_only_repo:
-            static_stage_map["tainter"] = (self.tainter, self._persist_tainter, "agent_skipped")
+        # Tainter runs BEFORE the parallel static stage, not inside it: the
+        # Python static verdict now uses taint flows to decide `sink_reachable`,
+        # so CONFIRMED means "a source→sink path reaches this package" rather
+        # than merely "a call chain reaches the import". Run in parallel, that
+        # is a race — python_reachability would usually observe an empty
+        # context.taint_flows and silently downgrade every finding to LIKELY.
+        # Tainter is milliseconds on a typical repo, so sequencing it is cheap.
+        if python_only_repo and "tainter" in tools:
+            results.append(
+                await self._run_and_persist(
+                    context,
+                    self.tainter,
+                    self._persist_tainter,
+                    error_event="agent_skipped",
+                )
+            )
         static_entries = self._stage_entries_from_tools(tools, static_stage_map)
         if static_entries:
             results.extend(await self._run_parallel_stage(context, static_entries))

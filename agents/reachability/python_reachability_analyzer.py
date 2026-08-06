@@ -8,28 +8,49 @@ providing intelligent risk assessment beyond simple version checking.
 
 import ast
 import json
+import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Set, Optional
 from dataclasses import dataclass, asdict, field
 
 from .common import (CriticalityLevel, UsageContext, VulnAnalysis,
                      build_report_dict)
+# First-party and mandatory — NOT wrapped in try/except. A PyPI distribution name
+# is frequently not the name you import ("PyYAML" -> yaml, "Pillow" -> PIL), so
+# matching source imports against the raw distribution name silently misses those
+# packages entirely. The tainter and dynamic-reachability agents have always used
+# this resolver; static reachability did not, which is why PyYAML scored
+# NOT_OBSERVED on an app whose headline finding is `yaml.load` on request data.
+from agents.utils.import_resolver import resolve_import_name
 
-# Import dependency tree analyzer for transitive dependency detection
+# These two sub-analyzers are optional only in the sense that the module still
+# imports without them — losing either silently guts the analysis. Both live in
+# this package and both went missing for seven months behind a bare
+# `except ImportError`, so failures are logged at WARNING with the actual
+# exception rather than swallowed. tests/test_static_reachability.py asserts
+# both flags are True; treat a False here as a broken install, not a config.
+logger = logging.getLogger(__name__)
+
 try:
     from .dependency_tree_analyzer import PythonDependencyTreeAnalyzer
     HAS_DEP_TREE_ANALYZER = True
-except ImportError:
+except ImportError as exc:
     HAS_DEP_TREE_ANALYZER = False
-    print("Warning: dependency_tree_analyzer not available, transitive dependency detection disabled")
+    logger.warning(
+        "static-reachability DEGRADED: dependency_tree_analyzer failed to import "
+        "(%s) — transitive dependency detection disabled", exc)
 
 try:
     from .python_call_graph import PythonCallGraphBuilder
     HAS_CALL_GRAPH = True
-except ImportError:
+except ImportError as exc:
     HAS_CALL_GRAPH = False
+    logger.warning(
+        "static-reachability DEGRADED: python_call_graph failed to import (%s) — "
+        "no call-chain evidence, so no finding can reach CONFIRMED", exc)
 
 
 @dataclass
@@ -49,7 +70,8 @@ class PythonReachabilityAnalyzer:
     # Maximum number of files to scan (DoS prevention)
     MAX_FILES_DEFAULT = 10000
 
-    def __init__(self, project_root: str, max_files: int = MAX_FILES_DEFAULT):
+    def __init__(self, project_root: str, max_files: int = MAX_FILES_DEFAULT,
+                 import_map: Optional[Dict[str, str]] = None):
         # Validate and resolve project root path
         try:
             root = Path(project_root).resolve(strict=True)
@@ -64,14 +86,27 @@ class PythonReachabilityAnalyzer:
         FORBIDDEN_PREFIXES = ('/etc', '/usr', '/var', '/bin', '/sbin',
                               '/lib', '/lib64', '/private/etc', '/private/var')
         root_str = str(root)
-        if root_str == '/' or any(
+        # The OS temp directory is a legitimate scan target — clones and
+        # extracted workdirs live there — but on macOS it resolves under
+        # /private/var/folders/..., which the '/var' prefix would reject. Without
+        # this exemption the analyzer refuses to scan any temp workdir on macOS.
+        try:
+            tmp_root = str(Path(tempfile.gettempdir()).resolve())
+        except (OSError, ValueError):
+            tmp_root = None
+        in_tempdir = bool(tmp_root) and (root_str == tmp_root or
+                                         root_str.startswith(tmp_root + '/'))
+        if not in_tempdir and (root_str == '/' or any(
             root_str == p or root_str.startswith(p + '/') for p in FORBIDDEN_PREFIXES
-        ):
+        )):
             raise ValueError(f"Scanning system directories is not allowed: {project_root}")
 
         self.project_root = root
         self.max_files = max_files
         self.files_scanned = 0
+        # dist -> module overrides discovered from the target app's own venv by
+        # MetadataAgent; layered over the curated table in import_resolver.
+        self.import_map = import_map or {}
 
         # Initialize dependency tree analyzer for transitive dependency detection
         self.dep_tree_analyzer = None
@@ -354,24 +389,43 @@ class PythonReachabilityAnalyzer:
 
         return dependencies
 
+    def candidate_module_names(self, package_name: str) -> Set[str]:
+        """Normalized module names a package's code can appear under in imports.
+
+        A distribution name is not an import name. Matching only on the
+        distribution name means `PyYAML` never matches `import yaml`,
+        `Pillow` never matches `from PIL import Image`, and `beautifulsoup4`
+        never matches `import bs4` — each a silent false negative on a package
+        that is genuinely used.
+        """
+        candidates = {self.normalize_package_name(package_name)}
+        try:
+            resolved = resolve_import_name(package_name, self.import_map)
+            if resolved:
+                candidates.add(self.normalize_package_name(resolved))
+        except Exception as e:  # resolution is best-effort; the raw name remains
+            print(f"Warning: could not resolve import name for {package_name}: {e}")
+        return candidates
+
     def find_package_usage(self,
                            package_name: str,
                            python_files: Optional[List[Path]] = None
                           ) -> List[UsageContext]:
         """Find all usages of a specific package in the codebase."""
         all_usages = []
-        normalized_package = self.normalize_package_name(package_name)
+        candidates = self.candidate_module_names(package_name)
 
         if python_files is None:
             python_files = self.find_python_files()
-        print(f"  Scanning {len(python_files)} Python files for '{package_name}' usage...")
+        print(f"  Scanning {len(python_files)} Python files for '{package_name}' usage "
+              f"(modules: {', '.join(sorted(candidates))})...")
 
         for file_path in python_files:
             usage_map = self.extract_imports_and_usage(file_path)
 
             # Check if this package is used
             for pkg, contexts in usage_map.items():
-                if self.normalize_package_name(pkg) == normalized_package:
+                if self.normalize_package_name(pkg) in candidates:
                     all_usages.extend(contexts)
 
         return all_usages
