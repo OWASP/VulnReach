@@ -8,7 +8,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
       python3-pytest \
       docker.io \
+      curl \
   && rm -rf /var/lib/apt/lists/*
+
+# Compose plugin: multi-container targets (e.g. OWASP crAPI) are brought up with
+# `docker compose`, and the observer has to be attached *before* that happens —
+# so the stack is started from in here rather than from the host. Debian's
+# docker.io package ships only the CLI, no plugins.
+ARG TARGETARCH
+ARG COMPOSE_VERSION=v2.29.7
+RUN set -eux; \
+    case "${TARGETARCH:-arm64}" in \
+      amd64) c=x86_64 ;; \
+      arm64) c=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /usr/libexec/docker/cli-plugins; \
+    curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${c}" \
+      -o /usr/libexec/docker/cli-plugins/docker-compose; \
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose; \
+    docker compose version
 
 # core.models (ReachabilityFinding) needs pydantic for the P5 verdict integration.
 RUN pip install --no-cache-dir --break-system-packages pydantic
