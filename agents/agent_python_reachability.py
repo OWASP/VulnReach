@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from correlation.engine import reachability_verdict
-from agents.ebpf.verdict_integration import taint_modules
-from agents.ebpf.package_index import _norm
-from agents.utils.import_resolver import resolve_import_name
+from agents.reachability.taint_match import sink_modules, package_taint_reachable
 from core.agent import BaseTool
 from core.models import AgentResult, ReachabilityFinding, ScanContext
 from agents.reachability.python_reachability_analyzer import (
@@ -54,8 +52,9 @@ class PythonReachabilityAgent(BaseTool):
 
         # Taint flows decide sink_reachable (see _map_findings). TainterAgent is
         # sequenced before this agent in runner.py precisely so this is populated.
-        tainted = taint_modules(getattr(context, "taint_flows", None))
-        finding_map = self._map_findings(analyses, vuln_inputs, tainted)
+        tainted = sink_modules(getattr(context, "taint_flows", None))
+        finding_map = self._map_findings(analyses, vuln_inputs, tainted,
+                                         context.import_map or {})
         findings = [ReachabilityFinding.model_validate(f).model_dump() for f in finding_map]
         metadata = {
             "status": "ok",
@@ -86,7 +85,8 @@ class PythonReachabilityAgent(BaseTool):
         return inputs
 
     def _map_findings(self, analyses: List[Any], vuln_inputs: List[Dict[str, Any]],
-                      tainted: Optional[set] = None):
+                      tainted: Optional[set] = None,
+                      import_map: Optional[Dict[str, str]] = None):
         # Map package -> cve_ids from inputs
         pkg_cves: Dict[str, List[str]] = {}
         for inp in vuln_inputs:
@@ -103,12 +103,16 @@ class PythonReachabilityAgent(BaseTool):
             # claim verdict=LIKELY (which the engine defines as import + call
             # chain) while reporting call_chain_exists=False alongside it.
             import_detected = bool(analysis.is_used)
-            call_chain_exists = bool(analysis.call_chain_graph)
-            # A call chain proves the package is reached, NOT that the vulnerable
-            # sink is. Only a static taint path from a source into this module
-            # supports that claim — otherwise `yaml.safe_load` and `yaml.load`
-            # would be indistinguishable and everything used would be CONFIRMED.
-            sink_reachable = call_chain_exists and self._is_tainted(analysis, tainted)
+            # A taint flow is itself a proven source→sink path, so it establishes
+            # BOTH that the sink is reachable and that a call chain exists — it is
+            # strictly stronger evidence than the analyzer's own call graph, and
+            # must not be gated behind it (the JS/Java analyzers frequently emit
+            # no call graph at all). A bare call chain, by contrast, proves the
+            # package is reached but not that the vulnerable sink is: LIKELY.
+            taint_reaches_sink = package_taint_reachable(
+                analysis.package_name, "python", tainted, import_map)
+            call_chain_exists = bool(analysis.call_chain_graph) or taint_reaches_sink
+            sink_reachable = taint_reaches_sink
             verdict = reachability_verdict(import_detected, call_chain_exists, sink_reachable)
             confidence = self._confidence_from_verdict(verdict)
             files = list(dict.fromkeys(ctx.file_path for ctx in analysis.usage_contexts))
@@ -163,24 +167,4 @@ class PythonReachabilityAgent(BaseTool):
     def _confidence_from_verdict(self, verdict: str) -> float:
         from correlation.engine import confidence_from_verdict
         return confidence_from_verdict(verdict)
-
-    def _is_tainted(self, analysis: Any, tainted: Optional[set]) -> bool:
-        """Does a static taint flow reach this package's module?
-
-        Matches on the module names the package can be imported under, so a
-        flow into `yaml` credits PyYAML rather than being lost to the
-        distribution-vs-import name mismatch.
-        """
-        if not tainted:
-            return False
-        names = {_norm(analysis.package_name)}
-        for ctx in getattr(analysis, "usage_contexts", None) or []:
-            module = getattr(ctx, "module", None) or getattr(ctx, "package", None)
-            if module:
-                names.add(_norm(str(module).split(".")[0]))
-        try:
-            names.add(_norm(resolve_import_name(analysis.package_name, {})))
-        except Exception:
-            pass
-        return bool(names & set(tainted))
 

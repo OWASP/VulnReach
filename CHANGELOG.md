@@ -4,6 +4,37 @@
 
 ### Fixed
 
+#### Static Java & JavaScript reachability over-claimed CONFIRMED
+- **`agent_java_reachability.py`, `agents/reachability/agent_bridge.py`** — both set
+  `sink_reachable = call_chain_exists`, so every used Java/JS/Go/PHP/C# package with a call chain
+  became CONFIRMED 0.95 with no proof the vulnerable sink was reached — the mirror image of the
+  Python false-negative below (over-claiming rather than under-claiming). Both now require a taint
+  path into the package's namespace, via a shared matcher.
+- **`agents/reachability/taint_match.py` (new)** — one conservative taint→package matcher for all
+  languages. Distribution names are not sink namespaces, and each language resolves its own: Python
+  via `import_resolver` (`PyYAML`→`yaml`), npm by bare/scoped name (`@a/b`→`b`), Maven by group
+  namespace **and** artifact token as a dotted segment of the sink (so `org.freemarker:freemarker`
+  matches sink `freemarker.template` and `com.google.code.gson:gson` matches `com.google.gson`,
+  where group ≠ package). Generic Maven tokens (`core`, `client`, …) never match alone. When it
+  cannot confidently associate a sink with a package it returns False, so the finding stays LIKELY.
+- **Tainter is not Python-only** — tainter 1.0.2 ships Java, JavaScript, and Go flow finders
+  (verified: `java.lang Runtime.exec`, JS `eval`, and library sinks `axios`/`sequelize`/
+  `com.google.gson`/`org.apache.velocity`). The runner previously skipped tainter for every
+  non-Python-only repo, so the Java and multi-language verdicts had no taint evidence at all. It now
+  runs whenever a supported language is present (`_TAINTER_LANGUAGES`), sequenced before the static
+  stage so its flows are available. The ROADMAP's "taint-flow is Python-only" is stale.
+- **Taint is stronger than the analyzer's call graph, not gated behind it** — a taint flow is itself
+  a proven source→sink path, so it establishes CONFIRMED on its own. The earlier grounding
+  (`sink_reachable = call_chain_exists AND taint`) would have produced **zero** CONFIRMEDs for
+  Java/JS, because those analyzers frequently emit no call graph — verified live: a real tainter
+  SSRF flow into `axios` reached CONFIRMED only once taint stopped being gated behind the (absent)
+  JS call graph. Applied consistently to Python too.
+
+Live end-to-end (real tainter + real multi-language bridge, JS SSRF fixture): `axios` (tainted) →
+CONFIRMED 0.95, `lodash` (used, not tainted) → POSSIBLE. Caveat: tainter's Java *library*-sink
+detection is uneven (its `Gson().fromJson` pattern did not fire), though builtin sinks and the
+matcher against its declared sink namespaces are validated.
+
 #### Static Python reachability — the call graph had been dead for seven months
 - **`agents/reachability/python_call_graph.py`, `dependency_tree_analyzer.py`** — moved into the
   package from `agents/utils/`. When `agents/reachability/` was created (2026-01-02, `667e355`) the

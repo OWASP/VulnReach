@@ -116,9 +116,25 @@ def test_taint_flow_is_required_for_confirmed():
 
 
 def test_import_only_is_possible():
-    """correlation.engine defines import-without-call-chain as POSSIBLE."""
-    f = _map_one(_FakeAnalysis("requests", True, None), {"requests"})
+    """Import detected, no call chain, and no taint into it → POSSIBLE.
+
+    (No taint deliberately: a taint flow reaching the package would itself prove
+    a source→sink path and lift it to CONFIRMED.)
+    """
+    f = _map_one(_FakeAnalysis("requests", True, None), set())
     assert f["verdict"] == "POSSIBLE"
+
+
+def test_taint_confirms_even_without_analyzer_call_graph():
+    """Taint is stronger than the analyzer's call graph, not gated behind it.
+
+    The JS/Java analyzers frequently emit no call_chain_graph; a proven taint
+    flow into the package must still reach CONFIRMED.
+    """
+    f = _map_one(_FakeAnalysis("PyYAML", True, None), {"yaml"})
+    assert f["verdict"] == "CONFIRMED"
+    assert f["call_chain_exists"] is True
+    assert f["sink_reachable"] is True
 
 
 def test_unused_package_is_not_observed():
