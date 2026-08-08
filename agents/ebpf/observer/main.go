@@ -255,8 +255,21 @@ func main() {
 	} else {
 		defer lk.Close()
 	}
+	// Legacy open() exists on x86-64 but not arm64; best-effort so an arm64-only
+	// kernel warns rather than fatals. Without it, musl/busybox file loads via
+	// open() (e.g. `echo > /tmp/f`) are missed on amd64.
+	openLive := false
+	if lk, err := link.Tracepoint("syscalls", "sys_enter_open", objs.HandleOpen, nil); err != nil {
+		emit(map[string]any{"v": 1, "type": "warn", "msg": "open unavailable: " + err.Error()})
+	} else {
+		defer lk.Close()
+		openLive = true
+	}
 
 	progs := []string{"sched_process_exec", "sys_enter_openat", "sys_enter_openat2", "sys_enter_mmap"}
+	if openLive {
+		progs = append(progs, "sys_enter_open")
+	}
 	if lk, ok := attachPython(&objs, *pythonLib, *pythonVersion); ok {
 		progs = append(progs, "uprobe:py_eval_frame")
 

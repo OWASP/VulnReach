@@ -204,6 +204,20 @@ int handle_openat2(struct trace_event_raw_sys_enter *ctx)
     return emit_open((const char *)ctx->args[1]);
 }
 
+// open(filename, flags, mode): args[0] is the path — there is no dirfd.
+//
+// The legacy open() syscall exists on x86-64 (nr 2) but NOT on arm64, which
+// implements only openat. musl/busybox use open() for an absolute-path redirect
+// (`echo > /tmp/f`), so on amd64 a file load can arrive as open() and would be
+// missed if we hooked only openat/openat2 — an arch-specific reachability gap
+// invisible on arm64. Attached best-effort (main.go warns if the tracepoint is
+// absent on an arm64-only kernel).
+SEC("tracepoint/syscalls/sys_enter_open")
+int handle_open(struct trace_event_raw_sys_enter *ctx)
+{
+    return emit_open((const char *)ctx->args[0]);
+}
+
 // Rule R2 evidence: mmap(..., PROT_EXEC, ..., fd, ...) on a file-backed fd means
 // code from that file was mapped for EXECUTION — the strongest syscall-level
 // proof that a native extension is actually being run (not merely read).
