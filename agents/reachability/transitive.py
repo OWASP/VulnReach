@@ -85,6 +85,49 @@ def requires_graph_from_site_packages(root: str, max_depth: int = 9) -> Dict[str
     return graph
 
 
+def requires_graph_from_lockfile(repo_path: str) -> Dict[str, Set[str]]:
+    """dist → set(dist it requires), parsed from a lockfile in the repo source.
+
+    This is the source that works at *static* time without the app's installed
+    environment: a lockfile encodes the resolved dependency graph and ships in
+    the repo. Supports poetry.lock and uv.lock (both carry explicit inter-package
+    edges). Pipfile.lock is intentionally not supported — it records resolved
+    versions but not the edges between them, so it is not a graph.
+
+    Returns {} when no supported lockfile is present (→ no transitive upgrades).
+    """
+    import tomllib
+
+    graph: Dict[str, Set[str]] = {}
+    for name in ("poetry.lock", "uv.lock"):
+        lock = os.path.join(repo_path, name)
+        if not os.path.isfile(lock):
+            continue
+        try:
+            with open(lock, "rb") as fh:
+                data = tomllib.load(fh)
+        except (OSError, ValueError):
+            continue
+        for pkg in data.get("package", []):
+            pkg_name = _norm(str(pkg.get("name", "")))
+            if not pkg_name:
+                continue
+            deps: Set[str] = set()
+            # poetry.lock: [package.dependencies] is a table {dep = constraint}.
+            raw = pkg.get("dependencies")
+            if isinstance(raw, dict):
+                deps.update(_norm(k) for k in raw)
+            # uv.lock: dependencies = [{ name = "dep" }, ...]
+            elif isinstance(raw, list):
+                for d in raw:
+                    if isinstance(d, dict) and d.get("name"):
+                        deps.add(_norm(str(d["name"])))
+            graph.setdefault(pkg_name, set()).update(deps)
+        if graph:
+            return graph
+    return graph
+
+
 def requires_graph_from_env() -> Dict[str, Set[str]]:
     """Fallback graph from the *current* interpreter's installed packages.
 

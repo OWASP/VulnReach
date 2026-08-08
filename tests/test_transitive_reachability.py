@@ -9,7 +9,8 @@ from __future__ import annotations
 import textwrap
 
 from agents.reachability.transitive import (
-    apply_transitive, requires_graph_from_site_packages, transitive_paths,
+    apply_transitive, requires_graph_from_lockfile,
+    requires_graph_from_site_packages, transitive_paths,
 )
 
 
@@ -65,6 +66,74 @@ def test_apply_transitive_noop_with_empty_graph():
                 {"package": "Werkzeug", "verdict": "NOT_OBSERVED"}]
     apply_transitive(findings, {})
     assert findings[1]["verdict"] == "NOT_OBSERVED"
+
+
+def test_requires_graph_from_poetry_lock(tmp_path):
+    """poetry.lock is the static-time graph source: [package.dependencies] edges.
+
+    This is what makes transitive reachability work in a real scan — the agent
+    has the repo source but not the app's installed env, and a lockfile carries
+    the resolved dependency graph.
+    """
+    (tmp_path / "poetry.lock").write_text(textwrap.dedent("""\
+        [[package]]
+        name = "Flask"
+        version = "2.0.1"
+        [package.dependencies]
+        Werkzeug = ">=2.0"
+        Jinja2 = ">=3.0"
+
+        [[package]]
+        name = "Jinja2"
+        version = "3.0.0"
+        [package.dependencies]
+        MarkupSafe = ">=2.0"
+    """))
+    graph = requires_graph_from_lockfile(str(tmp_path))
+    assert graph["flask"] == {"werkzeug", "jinja2"}
+    # closure reaches the grandchild
+    assert "markupsafe" in transitive_paths(["flask"], graph)
+
+
+def test_requires_graph_from_uv_lock(tmp_path):
+    (tmp_path / "uv.lock").write_text(textwrap.dedent("""\
+        [[package]]
+        name = "flask"
+        dependencies = [
+          { name = "werkzeug" },
+          { name = "jinja2" },
+        ]
+    """))
+    graph = requires_graph_from_lockfile(str(tmp_path))
+    assert graph["flask"] == {"werkzeug", "jinja2"}
+
+
+def test_requires_graph_no_lockfile_is_empty(tmp_path):
+    # A pinned requirements.txt has no edges → no graph → honest no-op.
+    (tmp_path / "requirements.txt").write_text("flask==2.0.1\nwerkzeug==2.0.1\n")
+    assert requires_graph_from_lockfile(str(tmp_path)) == {}
+
+
+def test_agent_requires_graph_uses_lockfile_not_scanner_env(tmp_path):
+    """The production wiring: the agent must source the graph from the repo's
+    lockfile, not the scanner's own environment (which holds vulnreach's deps,
+    never the target app's — the bug this fixes made transitive a silent no-op).
+    """
+    from agents.agent_python_reachability import PythonReachabilityAgent
+
+    (tmp_path / "poetry.lock").write_text(textwrap.dedent("""\
+        [[package]]
+        name = "flask"
+        [package.dependencies]
+        werkzeug = ">=2.0"
+    """))
+
+    class _Ctx:
+        repo_path = str(tmp_path)
+
+    graph = PythonReachabilityAgent()._requires_graph(_Ctx())
+    assert graph.get("flask") == {"werkzeug"}, \
+        "agent did not read the repo lockfile for the transitive graph"
 
 
 def test_requires_graph_from_site_packages_parses_metadata(tmp_path):

@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased] — 2026-08-09
+
+### Fixed
+
+#### Transitive reachability was a silent no-op in production — now sourced from lockfiles
+- Transitive reachability (a vulnerable dep reached through a used package → POSSIBLE, added
+  2026-08-06) never fired in a real scan. The agent read the dependency graph from
+  `context.container_root` / `context.target_root`, but **`ScanContext` has no such fields**, so it
+  always fell through to `requires_graph_from_env()` — the *scanner's* installed packages (289 of
+  vulnreach's own deps), which never contain the target app's edges. Verified by tracing the scan:
+  no step installs the target's requirements, and `MetadataAgent` likewise reads the scanner's
+  `importlib.metadata`, not the app's. The feature validated in Tier 3 only because the harness fed
+  it a container-derived graph explicitly.
+- Fixed by sourcing the graph from a **lockfile in the repo** — the one place the resolved
+  dependency graph exists at static time without the app's installed environment.
+  `requires_graph_from_lockfile` parses `poetry.lock` and `uv.lock` (both carry explicit
+  inter-package edges); `_requires_graph` now prefers it and drops the dead container-root gattrs.
+  Honest limitation, documented: an app with only a pinned `requirements.txt` (no lockfile, e.g.
+  `labs/python_vuln_app`) still gets no transitive upgrades at static time — a lockfile-less project
+  has no edge source until the runtime/container path can supply one (a future enhancement).
+  `Pipfile.lock` is intentionally unsupported: it records versions but not edges.
+- Tests: `test_transitive_reachability.py` gains poetry.lock / uv.lock parsing, the no-lockfile
+  no-op, and an agent-level test asserting the graph comes from the repo lockfile rather than the
+  scanner env (the exact bug).
+
 ## [Unreleased] — 2026-08-06
 
 ### Added

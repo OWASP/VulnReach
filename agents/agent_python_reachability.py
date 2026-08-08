@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from correlation.engine import reachability_verdict
 from agents.reachability.taint_match import sink_modules, package_taint_reachable
 from agents.reachability.transitive import (
-    apply_transitive, requires_graph_from_env, requires_graph_from_site_packages,
+    apply_transitive, requires_graph_from_env, requires_graph_from_lockfile,
 )
 from core.agent import BaseTool
 from core.models import AgentResult, ReachabilityFinding, ScanContext
@@ -180,18 +180,25 @@ class PythonReachabilityAgent(BaseTool):
     def _requires_graph(self, context: Any) -> Dict[str, Any]:
         """App dependency graph for transitive reachability, best-effort.
 
-        Prefers the target app's installed metadata under a container root
-        (``context.container_root`` / ``context.target_root``, set by the dynamic
-        path); otherwise falls back to the scanner's own environment, which is
-        correct only when it shares the app's venv. Returns {} → no transitive
-        upgrades, never an error.
+        The graph must describe the *target app's* dependencies, and the only
+        source available at static time (no app venv, no running container) is a
+        lockfile committed in the repo. A pinned requirements.txt carries no
+        edges, so an app without a lockfile gets no transitive upgrades — an
+        honest limitation, not an error.
+
+        The env fallback (the scanner's own installed packages) is used only when
+        the scanner literally shares the target's venv; in the normal case it has
+        vulnreach's dependencies, not the app's, so it contributes nothing.
+        Returns {} → no transitive upgrades.
         """
-        for attr in ("container_root", "target_root"):
-            root = getattr(context, attr, None)
-            if root and os.path.isdir(str(root)):
-                graph = requires_graph_from_site_packages(str(root))
-                if graph:
-                    return graph
+        repo_path = getattr(context, "repo_path", None)
+        if repo_path and os.path.isdir(str(repo_path)):
+            try:
+                graph = requires_graph_from_lockfile(str(repo_path))
+            except Exception:
+                graph = {}
+            if graph:
+                return graph
         try:
             return requires_graph_from_env()
         except Exception:
