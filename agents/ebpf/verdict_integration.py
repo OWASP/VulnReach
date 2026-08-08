@@ -27,7 +27,7 @@ which land in later phases.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from core.models import ReachabilityFinding
 from correlation.engine import dynamic_reachability_verdict

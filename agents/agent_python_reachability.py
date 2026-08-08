@@ -1,4 +1,3 @@
-import json
 import io
 import os
 import re
@@ -15,7 +14,6 @@ from core.agent import BaseTool
 from core.models import AgentResult, ReachabilityFinding, ScanContext
 from agents.reachability.python_reachability_analyzer import (
     PythonReachabilityAnalyzer,
-    run_python_reachability_analysis,
 )
 
 class PythonReachabilityAgent(BaseTool):

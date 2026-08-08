@@ -63,3 +63,16 @@ omit = [
     "*/__pycache__/*",
     "*.pyc",
 ]
+
+# Ruff config pinned explicitly so the lint job uses a stable, repo-defined rule
+# set rather than inheriting ruff's shifting defaults (a bump could turn CI red
+# on unrelated changes). E4/E7/E9 + F is ruff's default family: F = pyflakes
+# (dead imports/vars, undefined names), E7 = statement style, E9 = syntax.
+[tool.ruff]
+target-version = "py311"
+# Sample vulnerable apps and fixture/generated trees are not first-party source
+# to style-check (they mirror coverage's omit list).
+extend-exclude = ["labs", "tests/fixtures", "graphify-out"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

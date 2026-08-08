@@ -5,12 +5,11 @@ Dependency Tree Analyzer
 Utilities to detect transitive/indirect dependencies across different package managers.
 """
 
-import os
 import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Set, List, Optional, Tuple
+from typing import Dict, Set, List, Optional
 from dataclasses import dataclass
 
 # Every helper here shells out to a package manager (pipdeptree, npm, composer,
@@ -822,7 +821,7 @@ if __name__ == "__main__":
         print(f"   Transitive dependencies: {len(transitive)}")
 
         if transitive:
-            print(f"\n🔗 Transitive Dependencies:")
+            print("\n🔗 Transitive Dependencies:")
             for dep in transitive[:10]:  # Show first 10
                 parents = ', '.join(dep.parent_dependencies) if dep.parent_dependencies else 'unknown'
                 print(f"   • {dep.name} (required by: {parents})")

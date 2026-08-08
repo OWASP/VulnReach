@@ -37,7 +37,6 @@ import argparse
 import asyncio
 import io
 import json
-import os
 import re
 import subprocess
 import sys
@@ -146,13 +145,17 @@ def compare(static: dict[str, dict], loaded: set[str], executed: set[str],
         static_reachable = bool(st and st["verdict"] != _NOT_REACHABLE)
         ran = imp in loaded
         if static_reachable and ran:
-            tp += 1; cell = "TP"
+            tp += 1
+            cell = "TP"
         elif static_reachable and not ran:
-            fp += 1; cell = "FP"
+            fp += 1
+            cell = "FP"
         elif not static_reachable and ran:
-            fn += 1; cell = "FN"   # DANGER: ran but static said unreachable
+            fn += 1
+            cell = "FN"   # DANGER: ran but static said unreachable
         else:
-            tn += 1; cell = "TN"
+            tn += 1
+            cell = "TN"
         rows.append({"import": imp, "verdict": (st or {}).get("verdict", "—"),
                      "ran": ran, "executed": imp in executed, "cell": cell,
                      "import_detected": bool(st and st["import_detected"])})

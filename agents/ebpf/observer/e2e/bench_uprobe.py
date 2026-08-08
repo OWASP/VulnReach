@@ -174,9 +174,9 @@ def _hammer(url: str, seconds: float) -> dict:
         vals = sorted(vals)
         return round(vals[len(vals) // 2] / 1000, 1) if vals else None
 
-    lat = [l for _, l in samples]
-    early = [l for off, l in samples if off < WINDOW * 1e9]
-    late = [l for off, l in samples if off >= WINDOW * 1e9]
+    lat = [ln for _, ln in samples]
+    early = [ln for off, ln in samples if off < WINDOW * 1e9]
+    late = [ln for off, ln in samples if off >= WINDOW * 1e9]
     return {
         "requests": len(samples),
         "seconds": round(seconds, 1),

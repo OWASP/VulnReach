@@ -2215,7 +2215,6 @@ class DynamicReachabilityAgent(BaseTool):
             run_observer_reachability,
         )
 
-        ebpf_cfg = runtime.ebpf
         container_port = runtime.container_port
         timeout = runtime.timeout
         openapi_path = preflight.get("openapi_path")
