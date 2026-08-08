@@ -2,6 +2,28 @@
 
 ## [Unreleased] — 2026-08-06
 
+### Added
+
+#### Tier 3 — static reachability scored against runtime (eBPF) ground truth
+- **`agents/ebpf/observer/e2e/static_vs_runtime.py`** — an oracle that runs the real static
+  reachability path over an app's source and compares its per-package verdicts against the eBPF
+  observer's runtime inventory (which packages actually loaded/executed). Turns "static recall
+  improved" from an assertion into a measurement, and surfaces static **false negatives** — a
+  package that ran but static called unreachable — the PyYAML-class error that tells a user to
+  ignore a live CVE. Scoped to declared deps that are actually installed (the fair universe;
+  aligned on import name so `PyYAML`↔`yaml`). Splits false negatives into *direct-detection bugs*
+  (imported in source yet missed — a real regression) vs *indirect/transitive* (pulled in by
+  another dep, invisible to source-scanning static by design).
+- **First result — `labs/python_vuln_app` vs eBPF ground truth (16 packages loaded):**
+  **precision 1.00, recall 0.33**, and critically **zero direct-detection bugs**. The three
+  packages the app imports directly (`flask`, `requests`, `PyYAML`) are all caught and CONFIRMED
+  with no over-claiming; all six misses are indirect — `jinja2`/`werkzeug`/`markupsafe` (via Flask),
+  `certifi`/`urllib3` (via requests), and `coverage` (via the coverage-injection `sitecustomize`).
+  This reframes the earlier "recall 33%→100%" honestly: the 100% was on *directly-imported* deps;
+  overall recall against everything that loads is 0.33, and the entire gap is **transitive
+  reachability** — where a large share of real CVEs live (urllib3, werkzeug) — not detection bugs.
+  Motivates the transitive/framework-mediated reachability work next.
+
 ### Fixed
 
 #### Static Java & JavaScript reachability over-claimed CONFIRMED
