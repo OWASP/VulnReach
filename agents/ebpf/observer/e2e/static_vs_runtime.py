@@ -86,13 +86,18 @@ def run_tainter(app: Path) -> list[dict]:
         return []
 
 
-def static_python(app: Path) -> dict[str, dict]:
+def static_python(app: Path, requires_graph: dict | None = None) -> dict[str, dict]:
     """Run the REAL Python static reachability path over the declared deps.
 
-    Returns {import_name: {dist, verdict, import_detected}}.
+    ``requires_graph`` (dist → [deps], from the target app's environment) enables
+    the transitive-reachability upgrade: a vulnerable package the app does not
+    import directly but that a used package depends on becomes POSSIBLE.
+
+    Returns {import_name: {dist, verdict, import_detected, reachable_via}}.
     """
     from agents.reachability.python_reachability_analyzer import PythonReachabilityAnalyzer
     from agents.agent_python_reachability import PythonReachabilityAgent
+    from agents.reachability.transitive import apply_transitive
 
     deps = declared_dependencies(app)
     vulns = [{"package_name": d, "cve_ids": [f"CVE-{d}"]} for d in deps]
@@ -105,6 +110,8 @@ def static_python(app: Path) -> dict[str, dict]:
         mapped = PythonReachabilityAgent()._map_findings(
             analyses, [{"package_name": d, "cve_ids": [f"CVE-{d}"]} for d in deps],
             tainted, {})
+        if requires_graph:
+            mapped = apply_transitive(mapped, {k: set(v) for k, v in requires_graph.items()})
 
     out: dict[str, dict] = {}
     for f in mapped:
@@ -113,7 +120,8 @@ def static_python(app: Path) -> dict[str, dict]:
         prev = out.get(imp)
         if prev is None or _verdict_rank(f["verdict"]) > _verdict_rank(prev["verdict"]):
             out[imp] = {"dist": f["package"], "verdict": f["verdict"],
-                        "import_detected": f["import_detected"]}
+                        "import_detected": f["import_detected"],
+                        "reachable_via": f.get("reachable_via")}
     return out
 
 
@@ -231,6 +239,8 @@ def main() -> int:
     ap.add_argument("--path", action="append", default=[])
     ap.add_argument("--static-only", action="store_true",
                     help="run only the static half (no Docker)")
+    ap.add_argument("--requires-graph-json", default="",
+                    help="dist->[deps] graph from the app env (enables transitive POSSIBLE)")
     ap.add_argument("--runtime-json", default="",
                     help="load the runtime oracle from an inventory.py --out file "
                          "instead of driving Docker here (keeps the static side, "
@@ -244,7 +254,10 @@ def main() -> int:
         return 2
 
     print(f"[static] analyzing {app} ...", flush=True)
-    static = static_python(app)
+    rg = json.load(open(a.requires_graph_json)) if a.requires_graph_json else None
+    if rg:
+        print(f"[static] transitive graph: {len(rg)} packages with dependency edges", flush=True)
+    static = static_python(app, rg)
     reachable = {i for i, v in static.items() if v["verdict"] != _NOT_REACHABLE}
     print(f"[static] {len(static)} declared deps analyzed, "
           f"{len(reachable)} predicted reachable", flush=True)
@@ -253,7 +266,8 @@ def main() -> int:
         print("\n[static-only] verdicts:")
         for imp in sorted(static):
             v = static[imp]
-            print(f"  {imp:22s} {v['verdict']:12s} (dist={v['dist']})")
+            via = f" via {'->'.join(v['reachable_via'])}" if v.get("reachable_via") else ""
+            print(f"  {imp:22s} {v['verdict']:12s} (dist={v['dist']}){via}")
         return 0
 
     if a.runtime_json:

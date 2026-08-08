@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import re
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -7,6 +8,9 @@ from typing import Any, Dict, List, Optional
 
 from correlation.engine import reachability_verdict
 from agents.reachability.taint_match import sink_modules, package_taint_reachable
+from agents.reachability.transitive import (
+    apply_transitive, requires_graph_from_env, requires_graph_from_site_packages,
+)
 from core.agent import BaseTool
 from core.models import AgentResult, ReachabilityFinding, ScanContext
 from agents.reachability.python_reachability_analyzer import (
@@ -55,6 +59,13 @@ class PythonReachabilityAgent(BaseTool):
         tainted = sink_modules(getattr(context, "taint_flows", None))
         finding_map = self._map_findings(analyses, vuln_inputs, tainted,
                                          context.import_map or {})
+        # Transitive reachability: a vulnerable package the app never imports
+        # directly, but that a directly-used package depends on, is POSSIBLE
+        # rather than NOT_OBSERVED. The dependency graph must come from the app's
+        # own environment — the container root the dynamic path inspects if
+        # present, else the scanner's venv as a best-effort fallback.
+        requires_graph = self._requires_graph(context)
+        finding_map = apply_transitive(finding_map, requires_graph)
         findings = [ReachabilityFinding.model_validate(f).model_dump() for f in finding_map]
         metadata = {
             "status": "ok",
@@ -167,4 +178,24 @@ class PythonReachabilityAgent(BaseTool):
     def _confidence_from_verdict(self, verdict: str) -> float:
         from correlation.engine import confidence_from_verdict
         return confidence_from_verdict(verdict)
+
+    def _requires_graph(self, context: Any) -> Dict[str, Any]:
+        """App dependency graph for transitive reachability, best-effort.
+
+        Prefers the target app's installed metadata under a container root
+        (``context.container_root`` / ``context.target_root``, set by the dynamic
+        path); otherwise falls back to the scanner's own environment, which is
+        correct only when it shares the app's venv. Returns {} → no transitive
+        upgrades, never an error.
+        """
+        for attr in ("container_root", "target_root"):
+            root = getattr(context, attr, None)
+            if root and os.path.isdir(str(root)):
+                graph = requires_graph_from_site_packages(str(root))
+                if graph:
+                    return graph
+        try:
+            return requires_graph_from_env()
+        except Exception:
+            return {}
 
