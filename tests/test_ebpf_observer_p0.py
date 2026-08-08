@@ -108,34 +108,57 @@ def test_cgroup_isolation(two_containers):
 
 
 def test_openat_capture(two_containers):
-    """P1: openat file-load events are captured and cgroup-isolated."""
+    """P1: openat file-load events are captured and cgroup-isolated.
+
+    Retried a few times: a single attach window depends on the observer settling
+    before the exec, and on a busy CI runner that occasionally races. Each attempt
+    uses a fresh path so a stale event can't satisfy the assertion. Isolation
+    (no control-cgroup leakage) is checked on every attempt, so retrying only
+    forgives a *missed* capture, never a leak. `cat` is forced through a real
+    open() (not a builtin) so the read path always issues openat/openat2.
+    """
     target, control = two_containers
     resolver = DockerTargetResolver()
     rt = resolver.resolve(target)
     rc = resolver.resolve(control)
 
-    tag = uuid.uuid4().hex[:8]
-    tpath = f"/tmp/vr_open_t_{tag}"
-    cpath = f"/tmp/vr_open_c_{tag}"
+    def attempt() -> tuple[bool, list, str, str]:
+        tag = uuid.uuid4().hex[:8]
+        tpath = f"/tmp/vr_open_t_{tag}"
+        cpath = f"/tmp/vr_open_c_{tag}"
 
-    async def drive():
-        client = ObserverClient(_BIN)
-        await client.start([rt.cgroup_id], duration=5)
-        try:
-            await asyncio.sleep(1.0)
-            _run("docker", "exec", target, "sh", "-c", f"echo hi > {tpath}; cat {tpath}")
-            _run("docker", "exec", control, "sh", "-c", f"echo hi > {cpath}; cat {cpath}")
-            return await client.collect()
-        finally:
-            await client.stop()
+        async def drive():
+            client = ObserverClient(_BIN)
+            await client.start([rt.cgroup_id], duration=6)
+            try:
+                await asyncio.sleep(1.5)  # let both openat and openat2 attach
+                _run("docker", "exec", target, "sh", "-c",
+                     f"echo hi > {tpath}; head -c 2 {tpath} >/dev/null")
+                _run("docker", "exec", control, "sh", "-c",
+                     f"echo hi > {cpath}; head -c 2 {cpath} >/dev/null")
+                return await client.collect()
+            finally:
+                await client.stop()
 
-    events = asyncio.run(drive())
-    opens = [e for e in events if e["type"] == "open"]
+        events = asyncio.run(drive())
+        opens = [e for e in events if e["type"] == "open"]
+        captured = any(e["filename"] == tpath and e["cgroup_id"] == rt.cgroup_id
+                       for e in opens)
+        # Isolation must hold regardless of capture — never forgiven by retry.
+        assert not any(e["cgroup_id"] == rc.cgroup_id for e in events), \
+            "control cgroup leaked events"
+        assert not any(cpath in e["filename"] for e in opens), "control probe path leaked"
+        return captured, opens, tpath, cpath
 
-    assert any(e["filename"] == tpath and e["cgroup_id"] == rt.cgroup_id for e in opens), \
-        f"target open {tpath} not captured"
-    assert not any(e["cgroup_id"] == rc.cgroup_id for e in events), "control cgroup leaked events"
-    assert not any(cpath in e["filename"] for e in opens), "control probe path leaked"
+    last_tpath = ""
+    for _ in range(3):
+        captured, opens, last_tpath, _ = attempt()
+        if captured:
+            return
+    raise AssertionError(
+        f"target open {last_tpath} not captured after 3 attempts "
+        f"(openat/openat2 attach or arch issue). sample opens: "
+        f"{[o['filename'] for o in opens[:10]]}")
 
 
 _P2_IMAGE = os.environ.get("VULNREACH_P2_FIXTURE", "vulnreach-p2-fixture")

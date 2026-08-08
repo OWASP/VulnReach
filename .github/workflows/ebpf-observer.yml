@@ -45,6 +45,27 @@ jobs:
           go-version: "1.23"
           cache-dependency-path: agents/ebpf/observer/go.sum
 
+      # main.go references bpf2go-generated symbols (observerObjects, …) that
+      # live in observer_bpfel.go, which is generated and gitignored. Without it
+      # the package does not compile, so vet/test/build all fail. Generate it
+      # here — the runner has kernel BTF, so vmlinux.h + the CO-RE objects build
+      # exactly as they do in the observer-build image.
+      - name: Install eBPF build toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+          # bpftool: try the generic meta-package, then the running-kernel one.
+          if ! command -v bpftool >/dev/null; then
+            sudo apt-get install -y --no-install-recommends linux-tools-generic "linux-tools-$(uname -r)" || true
+          fi
+          command -v bpftool || { echo "::error::bpftool unavailable on runner"; exit 1; }
+
+      - name: Generate vmlinux.h + bpf objects
+        working-directory: agents/ebpf/observer
+        run: |
+          bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+          go generate ./...
+
       - name: Vet
         working-directory: agents/ebpf/observer
         run: go vet ./...
