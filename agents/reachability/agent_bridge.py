@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from correlation.engine import confidence_from_verdict, reachability_verdict
 from .multi_language_analyzer import run_multi_language_analysis
 from .taint_match import sink_modules, package_taint_reachable
+from .transitive import apply_transitive, requires_graph_from_lockfile
 
 
 class MultiLanguageReachabilityBridge:
@@ -131,8 +132,15 @@ class MultiLanguageReachabilityBridge:
                 with open(report_path, "r", encoding="utf-8") as f:
                     report = json.load(f)
                 raw_reports[language] = report
-                findings.extend(self._map_findings(report, vulnerabilities,
-                                                   language, tainted))
+                lang_findings = self._map_findings(report, vulnerabilities,
+                                                   language, tainted)
+                # Transitive reachability: a vulnerable package the app does not
+                # use directly, but that a used package depends on, is POSSIBLE.
+                # Sourced from the repo's lockfile (e.g. package-lock.json for
+                # node); empty for ecosystems without a source-time graph.
+                graph = requires_graph_from_lockfile(str(repo_path), ecosystem=language)
+                apply_transitive(lang_findings, graph)
+                findings.extend(lang_findings)
 
             findings = self._dedupe_findings(findings)
             if languages and not raw_reports:

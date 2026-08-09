@@ -2,6 +2,25 @@
 
 ## [Unreleased] — 2026-08-09
 
+### Added
+
+#### Transitive reachability for Node (npm package-lock.json)
+- Extended transitive reachability — a vulnerable dependency reached through a used package →
+  POSSIBLE with a parent chain — to JavaScript. `requires_graph_from_lockfile` is now
+  ecosystem-aware and parses `package-lock.json` (npm lockfileVersion 1/2/3): v2/v3 keys packages by
+  install path (`node_modules/<name>`, nested for version conflicts), v1 nests a tree with
+  `requires`; scoped (`@scope/pkg`) and nested packages are handled. Wired into the multi-language
+  bridge, which builds the graph per detected language and applies the upgrade to that language's
+  findings.
+- Validated against a real, large lockfile (npm CLI's 437 KB / 870-package `package-lock.json`):
+  correct closures such as `chalk → ansi-styles → color-convert → color-name` and
+  `glob → minimatch → brace-expansion → concat-map`.
+- **Java is intentionally not covered here.** Maven resolves the transitive tree at build time, so a
+  source-only checkout has no dependency graph (`pom.xml` lists direct deps only). The edges exist
+  only in the built jars (each carries its own `pom`), which is the container/runtime path — a
+  separate future source, not a static-time one. Node without a committed `package-lock.json`
+  degrades to no transitive upgrades, same honest limitation as a lockfile-less Python app.
+
 ### Fixed
 
 #### Transitive reachability was a silent no-op in production — now sourced from lockfiles

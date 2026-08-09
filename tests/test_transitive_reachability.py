@@ -6,6 +6,7 @@ rising 0.33 → 0.89 once these upgrades were applied, precision holding at 1.00
 """
 from __future__ import annotations
 
+import json
 import textwrap
 
 from agents.reachability.transitive import (
@@ -112,6 +113,69 @@ def test_requires_graph_no_lockfile_is_empty(tmp_path):
     # A pinned requirements.txt has no edges → no graph → honest no-op.
     (tmp_path / "requirements.txt").write_text("flask==2.0.1\nwerkzeug==2.0.1\n")
     assert requires_graph_from_lockfile(str(tmp_path)) == {}
+
+
+# ── Node (npm package-lock.json) ──────────────────────────────────────────────
+
+def test_node_package_lock_v3(tmp_path):
+    """npm lockfileVersion 2/3 keys packages by install path; edges under
+    `dependencies`. Scoped and nested packages must resolve correctly."""
+    (tmp_path / "package-lock.json").write_text(json.dumps({
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"dependencies": {"express": "^4.18.0"}},
+            "node_modules/express": {"dependencies": {"accepts": "~1.3.8"}},
+            "node_modules/accepts": {"dependencies": {"mime-types": "~2.1.34"}},
+            "node_modules/@scope/util": {"dependencies": {"lodash.merge": "^4.0.0"}},
+            "node_modules/express/node_modules/debug": {},  # nested, no deps
+        },
+    }))
+    graph = requires_graph_from_lockfile(str(tmp_path), ecosystem="node")
+    assert graph["express"] == {"accepts"}
+    assert graph["@scope/util"] == {"lodash-merge"}   # lodash.merge normalized
+    # closure reaches the grandchild through accepts
+    assert "mime-types" in transitive_paths(["express"], graph)
+
+
+def test_node_package_lock_v1(tmp_path):
+    """npm lockfileVersion 1 nests a dependency tree; edges under `requires`."""
+    (tmp_path / "package-lock.json").write_text(json.dumps({
+        "lockfileVersion": 1,
+        "dependencies": {
+            "express": {
+                "requires": {"accepts": "~1.3.8"},
+                "dependencies": {"debug": {"requires": {"ms": "2.0.0"}}},
+            },
+        },
+    }))
+    graph = requires_graph_from_lockfile(str(tmp_path), ecosystem="node")
+    assert graph["express"] == {"accepts"}
+    assert graph["debug"] == {"ms"}
+
+
+def test_node_transitive_upgrades_unused_dep_via_bridge():
+    """End-to-end shape: an unused npm package that a used one depends on becomes
+    POSSIBLE with a parent chain — the Node analogue of the Flask→Werkzeug case."""
+    from agents.reachability.agent_bridge import MultiLanguageReachabilityBridge
+
+    graph = {"express": {"accepts"}}
+    report = {"analyses": [
+        {"package_name": "express", "is_used": True, "call_chain_graph": "graph TD;",
+         "usage_contexts": []},
+        {"package_name": "accepts", "is_used": False, "call_chain_graph": None,
+         "usage_contexts": []},
+    ]}
+    vulns = [{"package": "express", "cve_id": ["CVE-E"]},
+             {"package": "accepts", "cve_id": ["CVE-A"]}]
+
+    bridge = MultiLanguageReachabilityBridge()
+    findings = bridge._map_findings(report, vulns, "javascript", set())
+    apply_transitive(findings, graph)
+    by = {f["package"]: f for f in findings}
+
+    assert by["express"]["verdict"] in ("POSSIBLE", "LIKELY")   # directly used
+    assert by["accepts"]["verdict"] == "POSSIBLE"               # transitively reached
+    assert by["accepts"]["reachable_via"] == ["express", "accepts"]
 
 
 def test_agent_requires_graph_uses_lockfile_not_scanner_env(tmp_path):

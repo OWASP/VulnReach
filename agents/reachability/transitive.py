@@ -85,17 +85,33 @@ def requires_graph_from_site_packages(root: str, max_depth: int = 9) -> Dict[str
     return graph
 
 
-def requires_graph_from_lockfile(repo_path: str) -> Dict[str, Set[str]]:
-    """dist → set(dist it requires), parsed from a lockfile in the repo source.
+def requires_graph_from_lockfile(repo_path: str, ecosystem: str = "python") -> Dict[str, Set[str]]:
+    """Resolved dependency graph (name → set(names it requires)) from a repo lockfile.
 
     This is the source that works at *static* time without the app's installed
-    environment: a lockfile encodes the resolved dependency graph and ships in
-    the repo. Supports poetry.lock and uv.lock (both carry explicit inter-package
-    edges). Pipfile.lock is intentionally not supported — it records resolved
-    versions but not the edges between them, so it is not a graph.
+    environment: a lockfile encodes the resolved graph and ships in the repo.
 
-    Returns {} when no supported lockfile is present (→ no transitive upgrades).
+    - python: poetry.lock, uv.lock (both carry explicit inter-package edges).
+    - node/javascript: package-lock.json (npm lockfileVersion 1/2/3).
+
+    Pipfile.lock and yarn.lock are not (yet) supported — the former records
+    versions but not edges; the latter needs a custom parser. Java/Maven has no
+    source-time transitive graph (Maven resolves it at build), so it is not
+    handled here; that requires the built jars, which the container path exposes.
+
+    Names are normalized the same way ``apply_transitive`` normalizes finding
+    packages, so the graph and the findings align regardless of ecosystem
+    quirks. Returns {} when no supported lockfile is present.
     """
+    eco = (ecosystem or "python").strip().lower()
+    if eco in ("node", "javascript", "js", "typescript"):
+        return _node_lockfile_graph(repo_path)
+    if eco == "python":
+        return _python_lockfile_graph(repo_path)
+    return {}
+
+
+def _python_lockfile_graph(repo_path: str) -> Dict[str, Set[str]]:
     import tomllib
 
     graph: Dict[str, Set[str]] = {}
@@ -125,6 +141,56 @@ def requires_graph_from_lockfile(repo_path: str) -> Dict[str, Set[str]]:
             graph.setdefault(pkg_name, set()).update(deps)
         if graph:
             return graph
+    return graph
+
+
+def _node_lockfile_graph(repo_path: str) -> Dict[str, Set[str]]:
+    """npm package-lock.json → dependency graph, across lockfileVersion 1/2/3.
+
+    v2/v3 key packages by install path (``node_modules/<name>``, nested for
+    version conflicts); the package name is the segment after the last
+    ``node_modules/``. v1 nests a ``dependencies`` tree where each entry lists
+    its edges under ``requires``. Both scoped (``@scope/pkg``) and nested
+    packages are handled.
+    """
+    import json
+
+    lock = os.path.join(repo_path, "package-lock.json")
+    if not os.path.isfile(lock):
+        return {}
+    try:
+        with open(lock, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+    graph: Dict[str, Set[str]] = {}
+    packages = data.get("packages")
+    if isinstance(packages, dict):  # lockfileVersion 2/3
+        for path, info in packages.items():
+            if not path or not isinstance(info, dict):
+                continue  # "" is the root project
+            name = path.rsplit("node_modules/", 1)[-1]
+            if not name:
+                continue
+            deps: Set[str] = set()
+            for key in ("dependencies", "optionalDependencies"):
+                d = info.get(key)
+                if isinstance(d, dict):
+                    deps.update(_norm(k) for k in d)
+            graph.setdefault(_norm(name), set()).update(deps)
+    else:  # lockfileVersion 1: nested tree with "requires"
+        def _walk(deps):
+            if not isinstance(deps, dict):
+                return
+            for name, info in deps.items():
+                if not isinstance(info, dict):
+                    continue
+                reqs = info.get("requires")
+                if isinstance(reqs, dict):
+                    graph.setdefault(_norm(name), set()).update(_norm(k) for k in reqs)
+                _walk(info.get("dependencies"))
+        _walk(data.get("dependencies"))
     return graph
 
 
