@@ -1,5 +1,158 @@
 # Changelog
 
+## [Unreleased] — 2026-08-09
+
+### Added
+
+#### Transitive reachability for Node (npm package-lock.json)
+- Extended transitive reachability — a vulnerable dependency reached through a used package →
+  POSSIBLE with a parent chain — to JavaScript. `requires_graph_from_lockfile` is now
+  ecosystem-aware and parses `package-lock.json` (npm lockfileVersion 1/2/3): v2/v3 keys packages by
+  install path (`node_modules/<name>`, nested for version conflicts), v1 nests a tree with
+  `requires`; scoped (`@scope/pkg`) and nested packages are handled. Wired into the multi-language
+  bridge, which builds the graph per detected language and applies the upgrade to that language's
+  findings.
+- Validated against a real, large lockfile (npm CLI's 437 KB / 870-package `package-lock.json`):
+  correct closures such as `chalk → ansi-styles → color-convert → color-name` and
+  `glob → minimatch → brace-expansion → concat-map`.
+- **Java is intentionally not covered here.** Maven resolves the transitive tree at build time, so a
+  source-only checkout has no dependency graph (`pom.xml` lists direct deps only). The edges exist
+  only in the built jars (each carries its own `pom`), which is the container/runtime path — a
+  separate future source, not a static-time one. Node without a committed `package-lock.json`
+  degrades to no transitive upgrades, same honest limitation as a lockfile-less Python app.
+
+### Fixed
+
+#### Transitive reachability was a silent no-op in production — now sourced from lockfiles
+- Transitive reachability (a vulnerable dep reached through a used package → POSSIBLE, added
+  2026-08-06) never fired in a real scan. The agent read the dependency graph from
+  `context.container_root` / `context.target_root`, but **`ScanContext` has no such fields**, so it
+  always fell through to `requires_graph_from_env()` — the *scanner's* installed packages (289 of
+  vulnreach's own deps), which never contain the target app's edges. Verified by tracing the scan:
+  no step installs the target's requirements, and `MetadataAgent` likewise reads the scanner's
+  `importlib.metadata`, not the app's. The feature validated in Tier 3 only because the harness fed
+  it a container-derived graph explicitly.
+- Fixed by sourcing the graph from a **lockfile in the repo** — the one place the resolved
+  dependency graph exists at static time without the app's installed environment.
+  `requires_graph_from_lockfile` parses `poetry.lock` and `uv.lock` (both carry explicit
+  inter-package edges); `_requires_graph` now prefers it and drops the dead container-root gattrs.
+  Honest limitation, documented: an app with only a pinned `requirements.txt` (no lockfile, e.g.
+  `labs/python_vuln_app`) still gets no transitive upgrades at static time — a lockfile-less project
+  has no edge source until the runtime/container path can supply one (a future enhancement).
+  `Pipfile.lock` is intentionally unsupported: it records versions but not edges.
+- Tests: `test_transitive_reachability.py` gains poetry.lock / uv.lock parsing, the no-lockfile
+  no-op, and an agent-level test asserting the graph comes from the repo lockfile rather than the
+  scanner env (the exact bug).
+
+## [Unreleased] — 2026-08-06
+
+### Added
+
+#### Tier 3 — static reachability scored against runtime (eBPF) ground truth
+- **`agents/ebpf/observer/e2e/static_vs_runtime.py`** — an oracle that runs the real static
+  reachability path over an app's source and compares its per-package verdicts against the eBPF
+  observer's runtime inventory (which packages actually loaded/executed). Turns "static recall
+  improved" from an assertion into a measurement, and surfaces static **false negatives** — a
+  package that ran but static called unreachable — the PyYAML-class error that tells a user to
+  ignore a live CVE. Scoped to declared deps that are actually installed (the fair universe;
+  aligned on import name so `PyYAML`↔`yaml`). Splits false negatives into *direct-detection bugs*
+  (imported in source yet missed — a real regression) vs *indirect/transitive* (pulled in by
+  another dep, invisible to source-scanning static by design).
+- **First result — `labs/python_vuln_app` vs eBPF ground truth (16 packages loaded):**
+  **precision 1.00, recall 0.33**, and critically **zero direct-detection bugs**. The three
+  packages the app imports directly (`flask`, `requests`, `PyYAML`) are all caught and CONFIRMED
+  with no over-claiming; all six misses are indirect — `jinja2`/`werkzeug`/`markupsafe` (via Flask),
+  `certifi`/`urllib3` (via requests), and `coverage` (via the coverage-injection `sitecustomize`).
+  This reframes the earlier "recall 33%→100%" honestly: the 100% was on *directly-imported* deps;
+  overall recall against everything that loads is 0.33, and the entire gap is **transitive
+  reachability** — where a large share of real CVEs live (urllib3, werkzeug) — not detection bugs.
+  Motivates the transitive/framework-mediated reachability work next.
+
+### Fixed
+
+#### Static Java & JavaScript reachability over-claimed CONFIRMED
+- **`agent_java_reachability.py`, `agents/reachability/agent_bridge.py`** — both set
+  `sink_reachable = call_chain_exists`, so every used Java/JS/Go/PHP/C# package with a call chain
+  became CONFIRMED 0.95 with no proof the vulnerable sink was reached — the mirror image of the
+  Python false-negative below (over-claiming rather than under-claiming). Both now require a taint
+  path into the package's namespace, via a shared matcher.
+- **`agents/reachability/taint_match.py` (new)** — one conservative taint→package matcher for all
+  languages. Distribution names are not sink namespaces, and each language resolves its own: Python
+  via `import_resolver` (`PyYAML`→`yaml`), npm by bare/scoped name (`@a/b`→`b`), Maven by group
+  namespace **and** artifact token as a dotted segment of the sink (so `org.freemarker:freemarker`
+  matches sink `freemarker.template` and `com.google.code.gson:gson` matches `com.google.gson`,
+  where group ≠ package). Generic Maven tokens (`core`, `client`, …) never match alone. When it
+  cannot confidently associate a sink with a package it returns False, so the finding stays LIKELY.
+- **Tainter is not Python-only** — tainter 1.0.2 ships Java, JavaScript, and Go flow finders
+  (verified: `java.lang Runtime.exec`, JS `eval`, and library sinks `axios`/`sequelize`/
+  `com.google.gson`/`org.apache.velocity`). The runner previously skipped tainter for every
+  non-Python-only repo, so the Java and multi-language verdicts had no taint evidence at all. It now
+  runs whenever a supported language is present (`_TAINTER_LANGUAGES`), sequenced before the static
+  stage so its flows are available. The ROADMAP's "taint-flow is Python-only" is stale.
+- **Taint is stronger than the analyzer's call graph, not gated behind it** — a taint flow is itself
+  a proven source→sink path, so it establishes CONFIRMED on its own. The earlier grounding
+  (`sink_reachable = call_chain_exists AND taint`) would have produced **zero** CONFIRMEDs for
+  Java/JS, because those analyzers frequently emit no call graph — verified live: a real tainter
+  SSRF flow into `axios` reached CONFIRMED only once taint stopped being gated behind the (absent)
+  JS call graph. Applied consistently to Python too.
+
+Live end-to-end (real tainter + real multi-language bridge, JS SSRF fixture): `axios` (tainted) →
+CONFIRMED 0.95, `lodash` (used, not tainted) → POSSIBLE. Caveat: tainter's Java *library*-sink
+detection is uneven (its `Gson().fromJson` pattern did not fire), though builtin sinks and the
+matcher against its declared sink namespaces are validated.
+
+#### Static Python reachability — the call graph had been dead for seven months
+- **`agents/reachability/python_call_graph.py`, `dependency_tree_analyzer.py`** — moved into the
+  package from `agents/utils/`. When `agents/reachability/` was created (2026-01-02, `667e355`) the
+  Java and JavaScript call graphs moved with it but the Python ones did not, so
+  `from .python_call_graph import PythonCallGraphBuilder` resolved to nothing. Both imports sat
+  behind a bare `except ImportError`, so instead of failing they silently set `HAS_CALL_GRAPH=False`
+  and `HAS_DEP_TREE_ANALYZER=False`. **Consequence: `call_chain_exists` and `sink_reachable` were
+  always False for Python, no static finding could reach CONFIRMED, and transitive dependency
+  detection never ran.** Verified against `labs/python_vuln_app`: static recall was 2 of 6 packages
+  that eBPF observed loading.
+- **PyPI name → import name resolution** — `find_package_usage` matched source imports against the
+  raw distribution name, so `PyYAML` never matched `import yaml`, `Pillow` never matched
+  `from PIL import Image`, `beautifulsoup4` never matched `import bs4`. The resolver
+  (`agents/utils/import_resolver.py`) already existed and was already used by TainterAgent and
+  DynamicReachabilityAgent — static reachability simply never called it. On the project's own demo
+  app this scored **PyYAML as NOT_OBSERVED at confidence 0.1**, advising users to ignore a reachable
+  `yaml.load` on request data; it now scores CONFIRMED 0.95. New
+  `PythonReachabilityAnalyzer.candidate_module_names()`; the analyzer also accepts `import_map` so
+  MetadataAgent's per-app discoveries layer over the curated table.
+- **Findings no longer contradict themselves** — the verdict and the reported evidence were computed
+  from different values, so a finding could report `verdict=LIKELY` (which `correlation.engine`
+  defines as import + call chain) beside `call_chain_exists=False`. Both now derive from one set of
+  booleans. Import-only correctly reports **POSSIBLE** rather than LIKELY.
+- **CONFIRMED now requires taint evidence** — `sink_reachable` was set to `bool(call_chain_graph)`,
+  conflating "a call chain reaches this package" with "the vulnerable sink is reachable", which made
+  every used package CONFIRMED 0.95 and could not distinguish `yaml.safe_load` from `yaml.load`. It
+  now requires a static taint path into the package's module, mirroring Rule R4 on the eBPF side.
+  `TainterAgent` is sequenced before the parallel static stage in `agents/runner.py` — run
+  concurrently it was a race that would have left `context.taint_flows` empty.
+- **Unbounded subprocesses in `dependency_tree_analyzer`** — all six package-manager calls
+  (`pipdeptree`, `npm ls --all`, `composer show`, `go mod graph`, `dotnet list`) ran with **no
+  timeout** against untrusted repository content, several of which reach the network. All are now
+  bounded. The `_has_pipdeptree()` probe shelled out to `pipdeptree --version`, measured at **over
+  180 seconds** against a large global site-packages — the probe, not the query, was the hang; it now
+  uses `shutil.which`. The pip dependency tree is cached per analyzer instance instead of being
+  rebuilt once per vulnerable package. Re-enabling transitive analysis without these hung a scan of a
+  3-file app; the same scan now completes in **0.7s**.
+- **macOS temp directories were refused** — the system-directory guard rejected any path under
+  `/var`, but `tempfile.gettempdir()` resolves to `/private/var/folders/...` on macOS, so the
+  analyzer refused to scan any temporary workdir there. The OS temp root is now exempted.
+
+### Added
+
+- **`tests/test_static_reachability.py`** — 14 unit tests (no Docker, no root, so they run in normal
+  CI). Covers the regression directly: `test_optional_analysis_modules_are_actually_importable`
+  asserts `HAS_CALL_GRAPH`/`HAS_DEP_TREE_ANALYZER` are True, which is the check that would have
+  caught the seven-month outage. Also covers distribution→import name bridging, the full verdict
+  gradation (CONFIRMED / LIKELY / POSSIBLE / NOT_OBSERVED), and that reported evidence always agrees
+  with the verdict. This path previously had no test coverage at all.
+
+---
+
 ## [Unreleased] — 2026-05-19
 
 ### Added

@@ -23,6 +23,11 @@ class EbpfSettings(BaseModel):
     # language: hint to the sidecar/tracer about the target runtime language.
     # "auto" lets the runtime detector choose; override with "python", "java", etc.
     language: str = "auto"
+    # engine: which eBPF implementation to use.
+    #   "legacy"   — the original bpftrace host-tracer / sidecar (Python/Java only)
+    #   "observer" — the language-agnostic CO-RE observer (cgroup-scoped syscalls,
+    #                Package-Index + Rule R1). Requires the built observer binary.
+    engine: str = "legacy"
 
 
 class RuntimeSettings(BaseModel):

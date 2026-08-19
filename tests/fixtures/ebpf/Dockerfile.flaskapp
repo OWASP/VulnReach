@@ -1,0 +1,30 @@
+# Minimal Flask/gunicorn app for the Tier B uprobe macro-benchmark.
+#
+# Exists so the *only* variable between runs is the interpreter version: the
+# labs/python_vuln_app image is pinned to 3.9, which is exactly the band where
+# every Python->Python call re-enters _PyEval_EvalFrameDefault. Build this at
+# 3.9 and 3.11 to measure what CPython's 3.11 frame inlining does to R5's cost.
+#
+#   docker build -f Dockerfile.flaskapp --build-arg PYVER=3.9  -t vr-flask:3.9  .
+#   docker build -f Dockerfile.flaskapp --build-arg PYVER=3.11 -t vr-flask:3.11 .
+ARG PYVER=3.11
+FROM python:${PYVER}-slim
+
+RUN pip install --no-cache-dir flask gunicorn pyyaml
+
+WORKDIR /app
+RUN printf 'import yaml\nfrom flask import Flask, jsonify\n\
+app = Flask(__name__)\n\
+DOC = "\\n".join("k%%d: v%%d" %% (i, i) for i in range(40))\n\
+\n\
+@app.route("/health")\n\
+def health():\n\
+    return jsonify(ok=True)\n\
+\n\
+@app.route("/yaml-test")\n\
+def yaml_test():\n\
+    d = yaml.safe_load(DOC)\n\
+    return jsonify(keys=len(d), sample=sorted(d)[:3])\n' > /app/app.py
+
+EXPOSE 3000
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:3000", "app:app"]

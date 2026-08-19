@@ -1,16 +1,19 @@
-import json
 import io
+import os
 import re
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from correlation.engine import reachability_verdict
+from agents.reachability.taint_match import sink_modules, package_taint_reachable
+from agents.reachability.transitive import (
+    apply_transitive, requires_graph_from_env, requires_graph_from_lockfile,
+)
 from core.agent import BaseTool
 from core.models import AgentResult, ReachabilityFinding, ScanContext
 from agents.reachability.python_reachability_analyzer import (
     PythonReachabilityAnalyzer,
-    run_python_reachability_analysis,
 )
 
 class PythonReachabilityAgent(BaseTool):
@@ -38,7 +41,8 @@ class PythonReachabilityAgent(BaseTool):
         stdout_buf = io.StringIO()
         try:
             with redirect_stdout(stdout_buf):
-                analyzer = PythonReachabilityAnalyzer(str(repo_path))
+                analyzer = PythonReachabilityAnalyzer(
+                    str(repo_path), import_map=context.import_map or {})
                 analyses = analyzer.analyze_vulnerability_reachability(vuln_inputs)
                 report = analyzer.generate_report(analyses)
         except Exception as exc:  # pragma: no cover
@@ -48,13 +52,25 @@ class PythonReachabilityAgent(BaseTool):
                 metadata={"error": "python_reachability_failed", "details": str(exc)},
             )
 
-        finding_map = self._map_findings(analyses, vuln_inputs)
+        # Taint flows decide sink_reachable (see _map_findings). TainterAgent is
+        # sequenced before this agent in runner.py precisely so this is populated.
+        tainted = sink_modules(getattr(context, "taint_flows", None))
+        finding_map = self._map_findings(analyses, vuln_inputs, tainted,
+                                         context.import_map or {})
+        # Transitive reachability: a vulnerable package the app never imports
+        # directly, but that a directly-used package depends on, is POSSIBLE
+        # rather than NOT_OBSERVED. The dependency graph must come from the app's
+        # own environment — the container root the dynamic path inspects if
+        # present, else the scanner's venv as a best-effort fallback.
+        requires_graph = self._requires_graph(context)
+        finding_map = apply_transitive(finding_map, requires_graph)
         findings = [ReachabilityFinding.model_validate(f).model_dump() for f in finding_map]
         metadata = {
             "status": "ok",
             "finding_count": len(findings),
             "raw": report,
             "logs": stdout_buf.getvalue(),
+            "taint_modules": sorted(tainted),
         }
         return AgentResult.model_validate({"tool_name": self.tool_name, "findings": findings, "metadata": metadata})
 
@@ -77,7 +93,9 @@ class PythonReachabilityAgent(BaseTool):
             )
         return inputs
 
-    def _map_findings(self, analyses: List[Any], vuln_inputs: List[Dict[str, Any]]):
+    def _map_findings(self, analyses: List[Any], vuln_inputs: List[Dict[str, Any]],
+                      tainted: Optional[set] = None,
+                      import_map: Optional[Dict[str, str]] = None):
         # Map package -> cve_ids from inputs
         pkg_cves: Dict[str, List[str]] = {}
         for inp in vuln_inputs:
@@ -89,7 +107,22 @@ class PythonReachabilityAgent(BaseTool):
         mapped: List[Dict[str, Any]] = []
         for analysis in analyses:
             cves = pkg_cves.get(analysis.package_name, [None]) or [None]
-            verdict = self._verdict_from_analysis(analysis)
+            # One set of booleans, used for BOTH the verdict and the reported
+            # evidence. They were computed separately before, so a finding could
+            # claim verdict=LIKELY (which the engine defines as import + call
+            # chain) while reporting call_chain_exists=False alongside it.
+            import_detected = bool(analysis.is_used)
+            # A taint flow is itself a proven source→sink path, so it establishes
+            # BOTH that the sink is reachable and that a call chain exists — it is
+            # strictly stronger evidence than the analyzer's own call graph, and
+            # must not be gated behind it (the JS/Java analyzers frequently emit
+            # no call graph at all). A bare call chain, by contrast, proves the
+            # package is reached but not that the vulnerable sink is: LIKELY.
+            taint_reaches_sink = package_taint_reachable(
+                analysis.package_name, "python", tainted, import_map)
+            call_chain_exists = bool(analysis.call_chain_graph) or taint_reaches_sink
+            sink_reachable = taint_reaches_sink
+            verdict = reachability_verdict(import_detected, call_chain_exists, sink_reachable)
             confidence = self._confidence_from_verdict(verdict)
             files = list(dict.fromkeys(ctx.file_path for ctx in analysis.usage_contexts))
             functions = self._extract_functions(analysis)
@@ -98,9 +131,9 @@ class PythonReachabilityAgent(BaseTool):
                     {
                         "cve_id": cve,
                         "package": analysis.package_name,
-                        "import_detected": analysis.is_used,
-                        "call_chain_exists": bool(analysis.call_chain_graph),
-                        "sink_reachable": bool(analysis.call_chain_graph),
+                        "import_detected": import_detected,
+                        "call_chain_exists": call_chain_exists,
+                        "sink_reachable": sink_reachable,
                         "verdict": verdict,
                         "confidence": confidence,
                         "evidence_type": "static",
@@ -144,10 +177,30 @@ class PythonReachabilityAgent(BaseTool):
         from correlation.engine import confidence_from_verdict
         return confidence_from_verdict(verdict)
 
-    def _verdict_from_analysis(self, analysis: Any) -> str:
-        if analysis.is_used and analysis.call_chain_graph:
-            return reachability_verdict(True, True, True)
-        if analysis.is_used:
-            return reachability_verdict(True, True, False)
-        return reachability_verdict(False, False, False)
+    def _requires_graph(self, context: Any) -> Dict[str, Any]:
+        """App dependency graph for transitive reachability, best-effort.
+
+        The graph must describe the *target app's* dependencies, and the only
+        source available at static time (no app venv, no running container) is a
+        lockfile committed in the repo. A pinned requirements.txt carries no
+        edges, so an app without a lockfile gets no transitive upgrades — an
+        honest limitation, not an error.
+
+        The env fallback (the scanner's own installed packages) is used only when
+        the scanner literally shares the target's venv; in the normal case it has
+        vulnreach's dependencies, not the app's, so it contributes nothing.
+        Returns {} → no transitive upgrades.
+        """
+        repo_path = getattr(context, "repo_path", None)
+        if repo_path and os.path.isdir(str(repo_path)):
+            try:
+                graph = requires_graph_from_lockfile(str(repo_path))
+            except Exception:
+                graph = {}
+            if graph:
+                return graph
+        try:
+            return requires_graph_from_env()
+        except Exception:
+            return {}
 

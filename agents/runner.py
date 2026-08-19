@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 _StageEntry = Tuple[Any, Callable[[ScanContext, AgentResult], None], str]
 
+# Languages the tainter CLI (1.0.2) can perform source→sink analysis for. Used
+# to decide whether taint evidence is available to ground a CONFIRMED verdict.
+_TAINTER_LANGUAGES = {"python", "java", "javascript", "go"}
+
 
 class AgentRunner:
     def __init__(self, storage: StorageRepository) -> None:
@@ -94,13 +98,21 @@ class AgentRunner:
         # ── Stage 3: Static/supplemental analysis (parallel) ─────────────
         # Safe to parallelize: all agents consume the same immutable repo/vuln
         # snapshot, and context updates are applied after each agent completes.
-        if "tainter" in tools and not python_only_repo:
+        #
+        # Tainter is NOT Python-only: tainter 1.0.2 ships Java, JavaScript and Go
+        # flow finders, so it runs for any repo whose languages it can analyze.
+        # It used to be skipped for every non-python-only repo, which left the
+        # Java and multi-language static verdicts with no taint evidence — and
+        # those paths set sink_reachable = call_chain_exists, marking every used
+        # package CONFIRMED without proof the vulnerable sink was reached.
+        taint_applicable = bool(set(detected_languages) & _TAINTER_LANGUAGES)
+        if "tainter" in tools and not taint_applicable:
             results.append(
                 self._persist_skipped(
                     context,
                     self.tainter.tool_name,
                     self._persist_tainter,
-                    "python_only_runtime_and_taint",
+                    "no_taint_supported_language",
                     detected_languages,
                 )
             )
@@ -128,8 +140,23 @@ class AgentRunner:
                 "agent_skipped",
             ),
         }
-        if python_only_repo:
-            static_stage_map["tainter"] = (self.tainter, self._persist_tainter, "agent_skipped")
+        # Tainter runs BEFORE the parallel static stage, not inside it: every
+        # static reachability verdict (Python, Java, and the multi-language
+        # bridge) now uses taint flows to decide `sink_reachable`, so CONFIRMED
+        # means "a source→sink path reaches this package" rather than merely "a
+        # call chain reaches the import". Run in parallel, that is a race —
+        # the reachability agents would observe an empty context.taint_flows and
+        # silently cap every finding at LIKELY. Tainter is milliseconds on a
+        # typical repo, so sequencing it is cheap.
+        if taint_applicable and "tainter" in tools:
+            results.append(
+                await self._run_and_persist(
+                    context,
+                    self.tainter,
+                    self._persist_tainter,
+                    error_event="agent_skipped",
+                )
+            )
         static_entries = self._stage_entries_from_tools(tools, static_stage_map)
         if static_entries:
             results.extend(await self._run_parallel_stage(context, static_entries))

@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,10 +19,10 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from .auth_resolver import AuthResolver
-from .flow_parser import parse_flows, load_flows_from_file
+from .flow_parser import load_flows_from_file
 from .http_context import build_http_context
 from .llm_client import LLMClient
-from .models import AttackFlow, Finding, HttpContext, IterationResult
+from .models import AttackFlow, Finding, IterationResult
 from .payload_session import PayloadSession
 from .response_analyser import analyse
 
@@ -195,7 +194,7 @@ def _print_summary(flow_results: List[FlowResult], parse_error_count: int = 0) -
         print(f"  Skipped (parse error):  {parse_error_count}")
 
     if confirmed:
-        print(f"\nCONFIRMED FINDINGS:")
+        print("\nCONFIRMED FINDINGS:")
         for i, fr in enumerate(confirmed, 1):
             f = fr.finding
             signal = f.evidence[:60] if f.evidence else "unknown"

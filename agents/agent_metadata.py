@@ -2,7 +2,7 @@
 import json
 import re
 from importlib import metadata as md
-from typing import Dict, List
+from typing import Dict
 
 from core.agent import BaseTool
 from core.models import AgentResult, ImportMappingFinding, ScanContext

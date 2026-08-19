@@ -8,7 +8,7 @@ import os
 import re
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from .common import (CriticalityLevel, UsageContext, VulnAnalysis,
                      normalize_severity, build_report_dict)

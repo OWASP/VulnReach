@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from correlation.engine import confidence_from_verdict, reachability_verdict
 from .multi_language_analyzer import run_multi_language_analysis
+from .taint_match import sink_modules, package_taint_reachable
+from .transitive import apply_transitive, requires_graph_from_lockfile
 
 
 class MultiLanguageReachabilityBridge:
@@ -46,12 +48,15 @@ class MultiLanguageReachabilityBridge:
         consolidated_path = getattr(context, "consolidated_path", None)
         output_dir = getattr(context, "output_dir", None)
         vulnerabilities = list(getattr(context, "vulnerabilities", []) or [])
+        # TainterAgent analyzes JS/Go too; its flows lift a finding to CONFIRMED.
+        tainted = sink_modules(getattr(context, "taint_flows", None))
 
         result = self.run_sync(
             project_root=repo_path,
             consolidated_path=consolidated_path,
             output_dir=output_dir,
             vulnerabilities=vulnerabilities,
+            tainted=tainted,
         )
 
         # Wrap in AgentResult if the model is available; otherwise return dict.
@@ -71,6 +76,7 @@ class MultiLanguageReachabilityBridge:
         consolidated_path: Optional[str],
         output_dir: Optional[str] = None,
         vulnerabilities: Optional[List[Dict[str, Any]]] = None,
+        tainted: Optional[set] = None,
     ) -> Dict[str, Any]:
         vulnerabilities = list(vulnerabilities or [])
         if not project_root:
@@ -126,7 +132,15 @@ class MultiLanguageReachabilityBridge:
                 with open(report_path, "r", encoding="utf-8") as f:
                     report = json.load(f)
                 raw_reports[language] = report
-                findings.extend(self._map_findings(report, vulnerabilities))
+                lang_findings = self._map_findings(report, vulnerabilities,
+                                                   language, tainted)
+                # Transitive reachability: a vulnerable package the app does not
+                # use directly, but that a used package depends on, is POSSIBLE.
+                # Sourced from the repo's lockfile (e.g. package-lock.json for
+                # node); empty for ecosystems without a source-time graph.
+                graph = requires_graph_from_lockfile(str(repo_path), ecosystem=language)
+                apply_transitive(lang_findings, graph)
+                findings.extend(lang_findings)
 
             findings = self._dedupe_findings(findings)
             if languages and not raw_reports:
@@ -195,7 +209,9 @@ class MultiLanguageReachabilityBridge:
             json.dump(normalised, f)
         return path
 
-    def _map_findings(self, report: Dict[str, Any], vulnerabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _map_findings(self, report: Dict[str, Any], vulnerabilities: List[Dict[str, Any]],
+                      language: Optional[str] = None,
+                      tainted: Optional[set] = None) -> List[Dict[str, Any]]:
         pkg_cves: Dict[str, List[str]] = {}
         for vuln in vulnerabilities:
             pkg = vuln.get("package") or vuln.get("package_name")
@@ -228,8 +244,13 @@ class MultiLanguageReachabilityBridge:
 
                 usage_contexts = analysis.get("usage_contexts", []) or []
                 import_detected = bool(analysis.get("is_used", False))
-                call_chain_exists = bool(analysis.get("call_chain_graph"))
-                sink_reachable = call_chain_exists
+                # Taint proves source→sink (CONFIRMED) on its own; a bare call
+                # chain proves only reachability (LIKELY). Taint is not gated
+                # behind the analyzer call graph, which the JS/Go/PHP analyzers
+                # frequently do not emit.
+                taint_reaches_sink = package_taint_reachable(package_name, language, tainted)
+                call_chain_exists = bool(analysis.get("call_chain_graph")) or taint_reaches_sink
+                sink_reachable = taint_reaches_sink
                 verdict = reachability_verdict(import_detected, call_chain_exists, sink_reachable)
                 confidence = confidence_from_verdict(verdict)
                 files = list(dict.fromkeys(
@@ -283,8 +304,9 @@ class MultiLanguageReachabilityBridge:
             evidence = vuln.get("evidence", {})
             usage_contexts = evidence.get("usage_contexts", []) if isinstance(evidence, dict) else []
             import_detected = bool(vuln.get("is_used", False))
-            call_chain_exists = bool(vuln.get("call_chain_graph"))
-            sink_reachable = call_chain_exists
+            taint_reaches_sink = package_taint_reachable(package_name, language, tainted)
+            call_chain_exists = bool(vuln.get("call_chain_graph")) or taint_reaches_sink
+            sink_reachable = taint_reaches_sink
             verdict = reachability_verdict(import_detected, call_chain_exists, sink_reachable)
             confidence = confidence_from_verdict(verdict)
             files = list(dict.fromkeys(

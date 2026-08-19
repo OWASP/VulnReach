@@ -41,6 +41,11 @@ class ReachabilityFinding(BaseModel):
     function: Optional[str] = None
     files: List[Any] = Field(default_factory=list)
     line: Optional[int] = None  # line number of the executed callsite / import
+    # For a vulnerable package the app does not import directly but that a
+    # directly-used package depends on: the chain from a used root to this
+    # package (e.g. ["flask", "werkzeug"]). Present ⇒ the POSSIBLE verdict is
+    # transitive (reachable via a parent), not a direct source usage.
+    reachable_via: Optional[List[str]] = None
 
 
 class SemgrepFinding(BaseModel):
