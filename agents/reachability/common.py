@@ -1,8 +1,6 @@
-import json
-import os
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 
 class CriticalityLevel(Enum):

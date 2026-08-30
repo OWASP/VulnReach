@@ -1,0 +1,16 @@
+# Generated at build time by `make all` (see Dockerfile.build / Makefile).
+# vmlinux.h: dumped from host BTF, kernel-specific (~3MB)
+vmlinux.h
+# bpf2go output
+observer_bpfel.go
+observer_bpfeb.go
+# compiled CO-RE objects (arch-specific)
+*.o
+# built observer binary
+/bin/
+
+# Live-test scratch
+f2.ndjson
+f2.err
+p1.ndjson
+p1.err

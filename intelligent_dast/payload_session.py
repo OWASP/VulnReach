@@ -18,7 +18,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode
 
 try:
     import requests as requests_lib
@@ -164,7 +164,7 @@ def _parse_llm_payload(raw: str) -> Optional[str]:
     if text.startswith("```"):
         lines = text.split("\n")
         # Remove first and last lines (fences)
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     try:

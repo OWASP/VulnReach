@@ -463,7 +463,7 @@ def main() -> None:
     runtime = detect_runtime(pid)
 
     # Phase 3
-    print(f"=== Phase 3: Selecting and attaching bpftrace probe ===")
+    print("=== Phase 3: Selecting and attaching bpftrace probe ===")
     script, parser = build_probe_script(pid, runtime)
     try:
         tracer = start_bpftrace(script)

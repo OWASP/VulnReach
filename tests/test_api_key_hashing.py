@@ -1,4 +1,3 @@
-import pytest
 from api.auth import hash_api_key, verify_api_key
 
 

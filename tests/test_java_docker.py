@@ -255,7 +255,6 @@ class TestJavaStaticReachability:
 
     def test_criticality_is_not_reachable_for_unknown_package(self, analyzer):
         """A package not present in the project must report is_used=False."""
-        from agents.reachability.java_reachability_analyzer import JavaReachabilityAnalyzer
         result = analyzer.analyze_vulnerability({
             "package": "com.example:nonexistent-lib",
             "severity": "CRITICAL",

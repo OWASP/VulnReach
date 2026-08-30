@@ -1,0 +1,5 @@
+# P2 fixture: a Python app image with one package we import (requests, + its
+# deps) and one we never import (tabulate), to test Rule R1 reached/unreached.
+FROM python:3.11-slim
+RUN pip install --no-cache-dir requests tabulate
+CMD ["sleep", "600"]

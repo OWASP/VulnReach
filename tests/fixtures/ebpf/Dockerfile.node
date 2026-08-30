@@ -1,0 +1,39 @@
+# Node fixture for Rule R1 + the nested-node_modules regression.
+#
+# Shape (built by hand, no npm install, so it needs no network and the versions
+# are exact):
+#
+#   node_modules/used@1.0.0            <- required by app.js
+#   node_modules/used/node_modules/
+#       nested@2.0.0                   <- required by `used`; NESTED install
+#   node_modules/nested@1.0.0          <- hoisted copy, a DIFFERENT version
+#   node_modules/unused@1.0.0          <- installed, never required
+#
+# The two copies of `nested` are the point. npm nests a dependency exactly when
+# its version disagrees with the hoisted one, so an index that stops at the first
+# node_modules attributes the nested files to `used` and reports the hoisted
+# 1.0.0 — the one version we know is NOT in play. Node resolves `require('nested')`
+# from used/index.js to the nested copy, so a correct index must report 2.0.0.
+FROM node:20-slim
+WORKDIR /app
+
+RUN mkdir -p node_modules/used/node_modules/nested node_modules/nested node_modules/unused \
+ && printf '{"name":"used","version":"1.0.0","main":"index.js"}\n' \
+      > node_modules/used/package.json \
+ && printf 'const n = require("nested");\nmodule.exports = () => "used+" + n();\n' \
+      > node_modules/used/index.js \
+ && printf '{"name":"nested","version":"2.0.0","main":"index.js"}\n' \
+      > node_modules/used/node_modules/nested/package.json \
+ && printf 'module.exports = () => "nested2";\n' \
+      > node_modules/used/node_modules/nested/index.js \
+ && printf '{"name":"nested","version":"1.0.0","main":"index.js"}\n' \
+      > node_modules/nested/package.json \
+ && printf 'module.exports = () => "nested1";\n' \
+      > node_modules/nested/index.js \
+ && printf '{"name":"unused","version":"1.0.0","main":"index.js"}\n' \
+      > node_modules/unused/package.json \
+ && printf 'module.exports = () => "unused";\n' \
+      > node_modules/unused/index.js \
+ && printf 'console.log(require("used")());\n' > app.js
+
+CMD ["sleep", "600"]

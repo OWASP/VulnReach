@@ -5,9 +5,8 @@ Generates a static call graph for Python projects to trace reachability.
 
 import ast
 import os
-import json
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Tuple
+from typing import List, Optional
 
 class PythonCallGraphBuilder:
     """
@@ -48,7 +47,7 @@ class PythonCallGraphBuilder:
                     full_path = Path(root) / file
                     try:
                         self._process_file(full_path)
-                    except Exception as e:
+                    except Exception:
                         # Log error but continue
                         pass
 
@@ -129,7 +128,7 @@ class PythonCallGraphBuilder:
                     if len(node.test.comparators) > 0 and isinstance(node.test.comparators[0], ast.Constant):
                         if node.test.comparators[0].value == "__main__":
                             return True
-        except:
+        except Exception:
             pass
         return False
 

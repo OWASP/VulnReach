@@ -1,4 +1,3 @@
-import pytest
 
 from agents.agent_trivy import TrivyAgent
 

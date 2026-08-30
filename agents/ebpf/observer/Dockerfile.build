@@ -1,0 +1,15 @@
+# Builder toolchain for the VulnReach eBPF observer.
+# Build once:  docker build -f Dockerfile.build -t vulnreach-observer-build .
+# Then drive builds with the source bind-mounted (see Makefile targets).
+FROM golang:1.23-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang \
+      llvm \
+      libbpf-dev \
+      bpftool \
+      make \
+      ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

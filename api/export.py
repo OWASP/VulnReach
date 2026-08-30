@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -232,7 +232,6 @@ def build_pdf(scan_id: str, scan: Dict[str, Any]) -> io.BytesIO:
             Paragraph(f"{risk:.1f}" if isinstance(risk, float) else "—", _S_CELL),
         ])
         row_idx = i  # header is row 0
-        bg = colors.white  # unused — we layer per-cell
         if sev in _SEV_COLOR:
             sev_row_styles.append(("BACKGROUND", (2, row_idx), (2, row_idx), _SEV_COLOR[sev]))
         if rc in _REACH_COLOR:
@@ -290,10 +289,14 @@ def build_pdf(scan_id: str, scan: Dict[str, Any]) -> io.BytesIO:
                 ])
             # Evidence chain flags
             flags = []
-            if ev.get("import_detected"):   flags.append("import ✓")
-            if ev.get("call_chain_exists"): flags.append("call-chain ✓")
-            if ev.get("sink_reachable"):    flags.append("sink ✓")
-            if ev.get("has_coverage_hit"):  flags.append("coverage ✓")
+            if ev.get("import_detected"):
+                flags.append("import ✓")
+            if ev.get("call_chain_exists"):
+                flags.append("call-chain ✓")
+            if ev.get("sink_reachable"):
+                flags.append("sink ✓")
+            if ev.get("has_coverage_hit"):
+                flags.append("coverage ✓")
             if flags:
                 detail_data.append([
                     Paragraph("Evidence", _S_SECTION),

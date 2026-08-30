@@ -130,11 +130,11 @@ class GoReachabilityAnalyzer:
         return usage_contexts
 
     def _module_paths_overlap(self, left: str, right: str) -> bool:
-        l = self._normalize_module_name(left)
-        r = self._normalize_module_name(right)
-        if not l or not r:
+        lhs = self._normalize_module_name(left)
+        rhs = self._normalize_module_name(right)
+        if not lhs or not rhs:
             return False
-        return l == r or l.startswith(r + "/") or r.startswith(l + "/")
+        return lhs == rhs or lhs.startswith(rhs + "/") or rhs.startswith(lhs + "/")
 
     def parse_go_mod(self) -> Dict[str, Dict[str, Any]]:
         """Parse dependencies from go.mod."""

@@ -9,7 +9,7 @@ import os
 import re
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Tuple
+from typing import List, Optional
 
 class JavaScriptCallGraphBuilder:
     """
@@ -62,7 +62,7 @@ class JavaScriptCallGraphBuilder:
                     full_path = Path(root) / file
                     try:
                         self._process_file(full_path)
-                    except Exception as e:
+                    except Exception:
                         pass
 
     def _process_file(self, file_path: Path):
@@ -83,7 +83,6 @@ class JavaScriptCallGraphBuilder:
 
             for i, line in enumerate(lines):
                 line = line.strip()
-                original_brace_balance = brace_balance
 
                 # Update brace balance
                 brace_balance += line.count('{')

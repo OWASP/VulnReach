@@ -1,4 +1,3 @@
-import pytest
 
 from correlation.engine import (
     classify_reachability,

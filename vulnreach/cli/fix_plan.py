@@ -1,7 +1,6 @@
 """vulnreach fix-plan — show which upgrades remove reachable CVEs."""
 
 import json
-from typing import Optional
 
 import click
 from rich.console import Console

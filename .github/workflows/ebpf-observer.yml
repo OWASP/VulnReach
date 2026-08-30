@@ -1,0 +1,145 @@
+name: eBPF Observer
+
+# The language-agnostic CO-RE observer (agents/ebpf/observer + agents/ebpf/*.py).
+# Distinct from ebpf-e2e.yml, which exercises the LEGACY bpftrace path.
+#
+# Why this workflow exists: the observer suite is gated on Linux + root + docker
+# + a built binary, so on a developer laptop it silently skips. Every result so
+# far was produced by hand on arm64. This runs it on amd64 — the architecture no
+# part of this subsystem had ever executed — and makes a skip a failure.
+
+on:
+  push:
+    branches: ["main", "master", "dev/**"]
+    paths:
+      - "agents/ebpf/**"
+      - "agents/agent_dynamic_reachability.py"
+      - "tests/test_ebpf_observer_p0.py"
+      - "tests/fixtures/ebpf/**"
+      - ".github/workflows/ebpf-observer.yml"
+  pull_request:
+    paths:
+      - "agents/ebpf/**"
+      - "agents/agent_dynamic_reachability.py"
+      - "tests/test_ebpf_observer_p0.py"
+      - "tests/fixtures/ebpf/**"
+      - ".github/workflows/ebpf-observer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast, unprivileged, no kernel required. Catches the arch-conditional
+  # userspace logic (USDT parameter-register mapping) on every push.
+  # ---------------------------------------------------------------------------
+  go-unit:
+    name: Go unit + vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # main.go references bpf2go-generated symbols (observerObjects, …) in
+      # observer_bpfel.go, which is generated and gitignored — so vet/test/build
+      # all need `go generate` first, which needs clang + libbpf + a working
+      # bpftool to dump vmlinux.h from BTF. Ubuntu's host bpftool is a
+      # kernel-version shim that is absent for the runner's azure kernel, so this
+      # runs inside the observer-build image (same toolchain the observer-suite
+      # build uses) rather than fighting apt. --privileged for /sys/kernel/btf.
+      - name: Build toolchain image
+        working-directory: agents/ebpf/observer
+        run: docker build -f Dockerfile.build -t vulnreach-observer-build .
+
+      - name: Vet + unit tests + cross-compile (in toolchain image)
+        working-directory: agents/ebpf/observer
+        run: |
+          docker run --rm --privileged -v "$PWD":/src vulnreach-observer-build sh -c '
+            set -eux
+            make vmlinux generate
+            go vet ./...
+            go test -v ./...
+            for arch in amd64 arm64; do
+              GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -o /tmp/observer-$arch .
+              echo "built $arch: $(ls -la /tmp/observer-$arch)"
+            done'
+
+  # ---------------------------------------------------------------------------
+  # The real thing: load CO-RE programs into the runner's kernel and run the
+  # full observer suite against live containers, on amd64.
+  # ---------------------------------------------------------------------------
+  observer-suite:
+    name: Observer suite (amd64, live kernel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail loudly and early with a diagnosis, rather than 20 minutes later
+      # inside a test, if this runner image cannot support the observer at all.
+      - name: Preflight — kernel, BTF, cgroup v2
+        run: |
+          set -eux
+          uname -a
+          test -f /sys/kernel/btf/vmlinux \
+            || { echo "::error::no /sys/kernel/btf/vmlinux — CO-RE needs kernel BTF"; exit 1; }
+          test -f /sys/fs/cgroup/cgroup.controllers \
+            || { echo "::error::not a cgroup v2 unified hierarchy"; exit 1; }
+          stat -c '%i' /sys/fs/cgroup
+          docker version --format '{{.Server.Version}}'
+
+      - name: Build the observer toolchain image
+        working-directory: agents/ebpf/observer
+        run: docker build -f Dockerfile.build -t vulnreach-observer-build .
+
+      # --privileged: `bpftool btf dump` reads /sys/kernel/btf/vmlinux to
+      # generate vmlinux.h, which is kernel- AND arch-specific. It is generated
+      # here rather than committed precisely so this job proves the amd64 path.
+      - name: Build the observer (vmlinux.h + bpf2go + binary)
+        working-directory: agents/ebpf/observer
+        run: |
+          docker run --rm --privileged -v "$PWD":/src vulnreach-observer-build make all
+          ls -la bin/vulnreach-observer
+          head -c 200 vmlinux.h
+
+      - name: Build test fixtures
+        working-directory: tests/fixtures/ebpf
+        run: |
+          docker build -f Dockerfile.p2   -t vulnreach-p2-fixture   .
+          docker build -f Dockerfile.node -t vulnreach-node-fixture .
+          docker build -f Dockerfile.java -t vulnreach-java-fixture .
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install pytest pydantic
+
+      # tracefs is normally already mounted on the runner; mount it if not.
+      # VULNREACH_EBPF_REQUIRE=1 makes a skipped suite a hard error — without it
+      # a missing binary or a non-root shell would report green having run zero
+      # tests, which is the exact failure this workflow exists to prevent.
+      - name: Run the observer suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          VULNREACH_EBPF_REQUIRE: "1"
+          VULNREACH_OBSERVER_BIN: ${{ github.workspace }}/agents/ebpf/observer/bin/vulnreach-observer
+        run: |
+          sudo mount -t tracefs nodev /sys/kernel/tracing 2>/dev/null || true
+          sudo -E env "PATH=$PATH" python -m pytest tests/test_ebpf_observer_p0.py -v --tb=short
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- observer --help ---"
+          sudo ./agents/ebpf/observer/bin/vulnreach-observer --help || true
+          echo "--- unfiltered smoke run (5s) ---"
+          sudo timeout 10 ./agents/ebpf/observer/bin/vulnreach-observer --duration 5 | head -20 || true
+          echo "--- dmesg (BPF verifier) ---"
+          sudo dmesg | tail -40 || true
+          docker ps -a
+
+      - name: Clean up stray fixture containers
+        if: always()
+        run: docker ps -aq --filter "name=vr_" | xargs -r docker rm -f || true
