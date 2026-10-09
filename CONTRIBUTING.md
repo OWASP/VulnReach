@@ -58,8 +58,8 @@ Open a GitHub Issue with the label `enhancement`. Describe:
 ### Clone and install
 
 ```bash
-git clone https://github.com/ihrishikesh0896/vulnreach.git
-cd vulnreach
+git clone https://github.com/OWASP/VulnReach.git
+cd VulnReach
 
 python -m venv .env
 source .env/bin/activate

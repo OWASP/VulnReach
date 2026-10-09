@@ -32,8 +32,8 @@ Optional tools (gracefully skipped if absent):
 ## Quick Start — Docker Compose
 
 ```bash
-git clone https://github.com/ihrishikesh0896/vulnreach.git
-cd vulnreach
+git clone https://github.com/OWASP/VulnReach.git
+cd VulnReach
 
 # 1. Copy and edit secrets
 cp .env.example .env.local

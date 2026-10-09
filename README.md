@@ -95,8 +95,8 @@ The result is a prioritised finding list with four tiers:
 > and configuring `CORS_ORIGINS`.
 
 ```bash
-git clone https://github.com/ihrishikesh0896/vulnreach.git
-cd vulnreach
+git clone https://github.com/OWASP/VulnReach.git
+cd VulnReach
 
 # 1. Create your local config
 cp .env.example .env.local

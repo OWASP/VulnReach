@@ -12,8 +12,8 @@ to trigger and gate on scans from a CI pipeline via `curl`.
 
 ### 1.1 Docker mode (recommended)
 ```bash
-git clone https://github.com/ihrishikesh0896/vulnreach.git
-cd vulnreach
+git clone https://github.com/OWASP/VulnReach.git
+cd VulnReach
 cp .env.example .env.local   # set DATABASE_URL, JWT_SECRET, etc.
 pip install vulnreach
 vulnreach start
