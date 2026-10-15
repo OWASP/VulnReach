@@ -7,13 +7,20 @@ This document tracks planned improvements, known limitations, and the current st
 | Language   | Status          | Analysis depth |
 |------------|-----------------|----------------|
 | Python     | Production-ready | Taint-flow, AST call graph, route exposure, runtime coverage (coverage.py + eBPF USDT) |
-| Java       | Functional      | Call graph (Maven/Gradle parsing, method scope tracking), import detection, **eBPF runtime coverage** (`hotspot:method__entry` USDT); no taint-flow |
-| JavaScript | Functional (experimental) | Call graph (route entry points, BFS path tracing), import + `package.json` detection; no taint-flow |
-| Go         | Roadmap         | Planned |
+| Java       | Functional      | Call graph (Maven/Gradle parsing, method scope tracking), import detection, taint-flow (via `tainter`, wired 2026-08-06) |
+| JavaScript | Functional (experimental) | Call graph (route entry points, BFS path tracing), import + `package.json` detection, taint-flow (via `tainter`, wired 2026-08-06) |
+| Go         | Roadmap         | Taint-flow available in `tainter`; reachability analyzer planned |
 | C#         | Roadmap         | Planned |
 | PHP        | Roadmap         | Planned |
 
-> Taint-flow analysis (user-input-to-sink tracing) is currently Python-only via the `tainter` tool. Java findings now support **dynamic confirmation** via eBPF `hotspot:method__entry` USDT probes — a Java CVE can reach `DYNAMICALLY_REACHABLE` when the vulnerable method is observed at runtime. JavaScript findings reflect call graph reachability only.
+> Taint-flow analysis (user-input-to-sink tracing) is **not** Python-only: `tainter` 1.0.2 ships
+> Python, Java, JavaScript, and Go flow finders, and as of 2026-08-06 the runner invokes it for any
+> repo in a supported language (previously it was skipped for every non-Python-only repo). A taint
+> path into a package's namespace is what lifts a static finding to `CONFIRMED`. **Caveat:** taint
+> *detection* for Java/JS is coverage- and structure-sensitive — the same logical sink fires or not
+> depending on how the code is written and whether the sink is modelled — so a `LIKELY` verdict does
+> not rule a sink out. See `docs/roadmap-runtime-reachability.md` (§Corrections) for the eBPF/probe
+> claims below that the language-agnostic observer redesign supersedes.
 
 ---
 
@@ -35,8 +42,10 @@ The "API interface" milestone originally slated for proposal-Phase 3 is complete
 
 ## Near-term (next 1–2 releases)
 
-- **Taint-flow for Java** — extend tainter or add a standalone Java taint analyzer; current call graph + eBPF runtime coverage is solid, gap is source-to-sink tracing
-- **Taint-flow for JavaScript** — same gap; call graph and route detection are in place
+- **Taint-flow sink coverage for Java/JavaScript** — the `tainter` flow finders are wired in, but
+  their modelled-sink sets are smaller than Python's and detection is structure-sensitive; broaden
+  sink models and harden the parsers so more real source→sink paths are found
+- **Taint-flow for Go** — `tainter` has a Go flow finder; add a Go reachability analyzer to consume it
 - **SBOM ingestion** — accept CycloneDX / SPDX SBOMs as scan input alongside live repos; currently only Trivy output is supported
 - **Workspace isolation** — restructure `GitAgent` so clones land in `{workdir}/clone/` and VulnReach-generated files (patched compose, coverage) live in `{workdir}/` alongside; eliminates the DooD path-resolution constraint for local path scans
 - **`POST /findings/{id}/explain`** — narrative-style finding explanation (deeper than `/scan/{id}/explain/{cve_id}`'s offline summary), built on the same `EvidenceGraph` contract used by `/next-steps`
@@ -66,8 +75,12 @@ The "API interface" milestone originally slated for proposal-Phase 3 is complete
 These are understood limitations that don't block current use cases but are worth knowing:
 
 - Dynamic scans require explicit Docker daemon opt-in (`VULNREACH_ALLOW_DOCKER_DAEMON=true`) via a restricted `docker-socket-proxy`
-- Java call graph is functional and eBPF runtime confirmation works on Linux; taint-flow (source-to-sink) is not yet supported for Java
-- JavaScript call graph analysis is functional but does not include taint-flow or eBPF runtime coverage
+- Java/JavaScript taint-flow is wired via `tainter`, but its modelled-sink coverage is narrower than
+  Python's and detection is sensitive to code structure — a non-CONFIRMED verdict does not prove a
+  sink is unreachable
+- Static reachability accuracy has not yet been scored against runtime (eBPF) ground truth on real
+  apps; recall/precision figures to date come from small fixtures (planned: the Tier 3 harness in
+  `docs/roadmap-runtime-reachability.md`)
 - PyPI → import name mapping covers ~50 packages; runtime fallback via `importlib.metadata` handles the rest
 - eBPF tracing requires Linux kernel ≥ 4.9 and `bpftrace` or BCC; Java USDT probes additionally require JVM flag `-XX:+ExtendedDTraceProbes`
 - Local path scans with DooD require the target directory to be under `VULNREACH_WORK_DIR` (default `/tmp/vulnreach`) so paths are identical on host and inside the VulnReach container; use `repo_url` for GitHub repos to avoid this constraint

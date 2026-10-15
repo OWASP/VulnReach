@@ -166,6 +166,16 @@ Steps to wire in a new agent:
 
 ---
 
+## Mentors
+
+If you're new to the project, these mentors can help you get oriented:
+
+- [Javed Alam](https://www.linkedin.com/in/jaalam/)
+- [Swapneil Kumar Dash](https://www.linkedin.com/in/swapneil-kumar-dash-7256a5b0/)
+
+Feel free to tag a mentor on your PR or issue if you'd like guidance before diving in.
+
+
 ## Commit Style
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):

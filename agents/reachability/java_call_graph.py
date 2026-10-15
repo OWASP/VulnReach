@@ -8,7 +8,7 @@ import os
 import re
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import List, Optional
 
 class JavaCallGraphBuilder:
     """
@@ -53,7 +53,7 @@ class JavaCallGraphBuilder:
                     full_path = Path(root) / file
                     try:
                         self._process_file(full_path)
-                    except Exception as e:
+                    except Exception:
                         pass # robust
 
     def _process_file(self, file_path: Path):
@@ -80,7 +80,6 @@ class JavaCallGraphBuilder:
 
             for i, line in enumerate(lines):
                 strip_line = line.strip()
-                original_brace_balance = brace_balance
 
                 # Check for annotations before logic
                 if strip_line.startswith('@'):

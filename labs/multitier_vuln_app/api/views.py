@@ -13,7 +13,6 @@ Vulnerable patterns exercised:
   - cryptography: Fernet with hardcoded key — bad practice + old version CVEs
 """
 
-import io
 import json
 import os
 
@@ -23,12 +22,11 @@ import markdown
 import requests
 import yaml
 from cryptography.fernet import Fernet
-from django.http import JsonResponse
 from lxml import etree
 from PIL import Image
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
-from rest_framework.parsers import JSONParser, MultiPartParser
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 from api.models import ImageAsset, Post

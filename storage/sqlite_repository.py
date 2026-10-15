@@ -7,7 +7,6 @@ Postgres is still recommended for multi-user server deployments.
 """
 
 import json
-import os
 import sqlite3
 import uuid
 from contextlib import contextmanager

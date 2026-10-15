@@ -322,7 +322,7 @@ def _parse_llm_decision(raw: str) -> AnalysisDecision:
     # Strip code fences
     if text.startswith("```"):
         lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     try:

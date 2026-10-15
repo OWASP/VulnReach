@@ -27,7 +27,6 @@ get_compose_down_command(original, override)          → list[str]
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from pathlib import Path
 
