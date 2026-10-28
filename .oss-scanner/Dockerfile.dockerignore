@@ -1,0 +1,9 @@
+# BuildKit uses this file instead of the root .dockerignore when building .oss-scanner/Dockerfile.
+# The root one is written for the product image and drops tests/, docs/, *.md and conftest.py,
+# which the audit needs; only leave out local caches here.
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
