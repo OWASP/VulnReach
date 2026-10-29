@@ -22,6 +22,13 @@ the dated "3.0.0 development" sections below have the details.
   Slack `#project-vulnreach`, OpenSSF Best Practices registration, and
   enrollment in Anthropic's OSS Scanner (`.oss-scanner/`).
 
+### Fixed
+- **CI coverage gate never ran.** The test job passed `--cov-omit`, which is
+  not a pytest-cov option, so pytest exited during argument parsing. The omit
+  rules now live in `pyproject.toml` under `[tool.coverage.run]`. Diagnosed
+  and first proposed by [@Bornunique911](https://github.com/Bornunique911) in
+  [#1](https://github.com/OWASP/VulnReach/pull/1).
+
 ## 3.0.0 development — 2026-10-01
 
 ### Changed
