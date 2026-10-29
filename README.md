@@ -5,6 +5,7 @@
 [![OWASP Project](https://img.shields.io/badge/OWASP-Project-blue.svg)](https://www.owasp.community/projects/vulnreach)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Slack](https://img.shields.io/badge/slack-%23project--vulnreach-4A154B?logo=slack)](https://owasp.org/slack/invite)
 
 > **VulnReach is now an official [OWASP Project](https://www.owasp.community/projects/vulnreach).** 🎉
 
@@ -213,6 +214,14 @@ Full methodology, evidence chain detail, and package-level breakdown: [docs/benc
 Optional (all skip gracefully if absent):
 - `semgrep` — `pip install semgrep`
 - `tainter` — `pip install tainter` (taint-flow analysis; see [development guide](docs/development.md#tainter--optional-taint-analysis))
+
+---
+
+## Community & Support
+
+- **Slack** — [join the OWASP Slack workspace](https://owasp.org/slack/invite), then the `#project-vulnreach` channel for questions and discussion.
+- **Bugs & feature requests** — [GitHub Issues](https://github.com/OWASP/VulnReach/issues).
+- **Security issues** — report privately as described in [SECURITY.md](SECURITY.md), not in Slack or public issues.
 
 ---
 
