@@ -1,6 +1,28 @@
 # Changelog
 
-## [Unreleased] — 2026-10-01
+## [3.0.0] — 2026-10-30
+
+First release as an official OWASP project. Covers everything since v2.0.1;
+the dated "3.0.0 development" sections below have the details.
+
+### Breaking
+- **CLI is now lifecycle-only.** `vulnreach scan`, `fix-plan`, `replay` and
+  `explain` are removed; scan from the web UI or the API (`curl`). The CLI is
+  now `vulnreach start` / `stop` / `reload` / `status`. CI/CD gating via
+  `policy.block_if` is unchanged — see [docs/ci-cd-gating.md](docs/ci-cd-gating.md).
+
+### Highlights
+- Transitive reachability now works in real scans (sourced from the target's
+  lockfiles) and covers Node via `package-lock.json`.
+- Static reachability scored against runtime (eBPF) ground truth; fixes for
+  over-claimed Java/JavaScript results and the dead Python call graph.
+- Java eBPF sidecar support and Java E2E lab.
+- AI next-steps endpoint (`POST /findings/{id}/next-steps`).
+- Repository moved to [OWASP/VulnReach](https://github.com/OWASP/VulnReach);
+  Slack `#project-vulnreach`, OpenSSF Best Practices registration, and
+  enrollment in Anthropic's OSS Scanner (`.oss-scanner/`).
+
+## 3.0.0 development — 2026-10-01
 
 ### Changed
 
@@ -31,7 +53,7 @@
 
 ---
 
-## [Unreleased] — 2026-08-09
+## 3.0.0 development — 2026-08-09
 
 ### Added
 
@@ -75,7 +97,7 @@
   no-op, and an agent-level test asserting the graph comes from the repo lockfile rather than the
   scanner env (the exact bug).
 
-## [Unreleased] — 2026-08-06
+## 3.0.0 development — 2026-08-06
 
 ### Added
 
@@ -184,7 +206,7 @@ matcher against its declared sink namespaces are validated.
 
 ---
 
-## [Unreleased] — 2026-05-19
+## 3.0.0 development — 2026-05-19
 
 ### Added
 
@@ -227,7 +249,7 @@ matcher against its declared sink namespaces are validated.
 
 ---
 
-## [Unreleased] — 2026-04-16
+## 3.0.0 development — 2026-04-16
 
 ### Added
 
@@ -276,7 +298,7 @@ matcher against its declared sink namespaces are validated.
 
 ---
 
-## [Unreleased] — 2026-03-27
+## 2.0.1 development — 2026-03-27
 
 ### Added
 
@@ -296,7 +318,7 @@ matcher against its declared sink namespaces are validated.
 
 ---
 
-## [Unreleased] — 2026-03-26
+## 2.0.1 development — 2026-03-26
 
 ### Bug Fixes
 

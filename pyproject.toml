@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vulnreach"
-version = "2.0.1"
+version = "3.0.0"
 description = "Vulnerability reachability scanner — proves which CVEs are actually reachable"
 requires-python = ">=3.11"
 dependencies = [
