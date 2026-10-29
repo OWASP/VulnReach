@@ -5,7 +5,7 @@
 [![OWASP Project](https://img.shields.io/badge/OWASP-Project-blue.svg)](https://www.owasp.community/projects/vulnreach)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![Slack](https://img.shields.io/badge/slack-%23project--vulnreach-4A154B?logo=slack)](https://owasp.org/slack/invite)
+[![Slack](https://img.shields.io/badge/slack-%23project--vulnreach-4A154B?logo=slack)](https://owasp.slack.com/archives/C0BLVF8QZAN)
 
 > **VulnReach is now an official [OWASP Project](https://www.owasp.community/projects/vulnreach).** 🎉
 
@@ -219,7 +219,7 @@ Optional (all skip gracefully if absent):
 
 ## Community & Support
 
-- **Slack** — [join the OWASP Slack workspace](https://owasp.org/slack/invite), then the `#project-vulnreach` channel for questions and discussion.
+- **Slack** — [`#project-vulnreach`](https://owasp.slack.com/archives/C0BLVF8QZAN) on the OWASP Slack workspace for questions and discussion. New to OWASP Slack? [Join here](https://owasp.org/slack/invite) first.
 - **Bugs & feature requests** — [GitHub Issues](https://github.com/OWASP/VulnReach/issues).
 - **Security issues** — report privately as described in [SECURITY.md](SECURITY.md), not in Slack or public issues.
 
