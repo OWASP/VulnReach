@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Slack](https://img.shields.io/badge/slack-%23project--vulnreach-4A154B?logo=slack)](https://owasp.slack.com/archives/C0BLVF8QZAN)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16041/badge)](https://www.bestpractices.dev/projects/16041)
 
 > **VulnReach is now an official [OWASP Project](https://www.owasp.community/projects/vulnreach).** 🎉
 
