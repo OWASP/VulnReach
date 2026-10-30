@@ -9,14 +9,16 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import bcrypt as _bcrypt
+import jwt
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
 
 logger = logging.getLogger(__name__)
 
 _ALGORITHM = "HS256"
+# HS256 keys shorter than the 256-bit hash output weaken the HMAC (RFC 7518 §3.2).
+_MIN_JWT_SECRET_BYTES = 32
 
 
 # Track .env.local mtime so we reload env vars whenever the file changes.
@@ -93,12 +95,16 @@ def _jwt_secret() -> str:
     secret = os.getenv("JWT_SECRET")
     if not secret:
         raise RuntimeError("JWT_SECRET env var must be set")
+    if len(secret.encode("utf-8")) < _MIN_JWT_SECRET_BYTES:
+        raise RuntimeError(
+            f"JWT_SECRET must be at least {_MIN_JWT_SECRET_BYTES} bytes "
+            "(generate one with: openssl rand -hex 32)"
+        )
     return secret
 
 
 def create_token(principal: UserPrincipal) -> str:
-    # exp must be an integer Unix timestamp — passing a datetime can produce
-    # a float in some python-jose versions, which breaks standard JWT decoders.
+    # exp is an integer Unix timestamp so every JWT decoder accepts it.
     # Read expiry at call time so .env.local changes take effect on next login.
     expire_minutes = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
     now = int(time.time())
@@ -115,7 +121,7 @@ def create_token(principal: UserPrincipal) -> str:
 def _decode_token(token: str) -> UserPrincipal:
     try:
         payload = jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
-    except JWTError as exc:
+    except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
     sub = payload.get("sub")

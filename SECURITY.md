@@ -77,6 +77,6 @@ VulnReach requires access to the Docker socket (`/var/run/docker.sock`) to perfo
 
 - Run it in an isolated environment, not on a production host
 - Restrict network access so only authorized clients can reach port 8000
-- Use a strong, randomly generated `JWT_SECRET` (minimum 256 bits)
+- Use a strong, randomly generated `JWT_SECRET` (minimum 256 bits; shorter secrets are rejected at runtime)
 - Rotate the JWT secret periodically and on suspected compromise
 - Do not expose the Docker socket to untrusted users via VulnReach

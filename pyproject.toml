@@ -23,6 +23,8 @@ server = [
     "uvicorn>=0.40",
     "psycopg2-binary>=2.9",
     "slowapi>=0.1",
+    "pyjwt>=2.15",
+    "bcrypt>=4.1",
 ]
 llm = [
     "anthropic>=0.85",

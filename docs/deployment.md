@@ -73,7 +73,7 @@ All variables are read from `.env.local` (takes precedence) and then `.env`. Cha
 | Variable | Example | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | `postgresql://user:pass@localhost:5432/vulnreach` | PostgreSQL connection string |
-| `JWT_SECRET` | `$(openssl rand -hex 32)` | HS256 signing key — minimum 256 bits |
+| `JWT_SECRET` | `$(openssl rand -hex 32)` | HS256 signing key — minimum 256 bits (32 bytes), enforced at runtime |
 | `SEED_ADMIN_USERNAME` | `admin` | Username for the bootstrap admin account |
 | `SEED_ADMIN_PASSWORD` | `changeme` | Password for the bootstrap admin account |
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- **All known vulnerabilities in pinned dependencies fixed.** `pip-audit` on
+  `requirements.txt` went from 152 known vulnerabilities in 21 packages to none
+  (aiohttp, starlette, python-multipart, PyJWT, cryptography, pillow, urllib3,
+  requests and others bumped).
+- **`python-jose` replaced with PyJWT** for JWT signing/verification
+  (`api/auth.py`); python-jose has an unfixed vulnerability.
+- **`JWT_SECRET` must be at least 32 bytes.** Shorter secrets are rejected when
+  issuing or verifying tokens, instead of silently weakening HS256.
+
+### Fixed
+- `pip install vulnreach[server]` now installs PyJWT and bcrypt; previously
+  `api/auth.py` failed to import with only the `server` extra.
+
+### Removed
+- Unused `openai-agents` and `mcp` pins (nothing imports them).
+
+### Added
+- `.bestpractices.json` with proposed OpenSSF Best Practices answers.
+- Tests for JWT issue/verify, short and missing secrets, expiry, wrong key and
+  `alg=none` (`tests/test_jwt_auth.py`).
+
 ## [3.0.0] — 2026-10-30
 
 First release as an official OWASP project. Covers everything since v2.0.1;
