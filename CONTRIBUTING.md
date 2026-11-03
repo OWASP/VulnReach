@@ -12,6 +12,7 @@ Thank you for your interest in contributing. VulnReach is an Open Source project
 - [Submitting a Pull Request](#submitting-a-pull-request)
 - [Adding a New Agent](#adding-a-new-agent)
 - [Commit Style](#commit-style)
+- [Developer Certificate of Origin](#developer-certificate-of-origin)
 
 ---
 
@@ -125,7 +126,9 @@ pytest tests/integration/ -v --timeout=120
 
 5. Update `CHANGELOG.md` under `[Unreleased]` with a one-line description of your change.
 
-6. Open a PR against `main`. Fill in the PR template:
+6. Sign off every commit (`git commit -s`) — see [Developer Certificate of Origin](#developer-certificate-of-origin).
+
+7. Open a PR against `main`. Fill in the PR template:
    - What problem does this solve?
    - How was it tested?
    - Any known limitations?
@@ -189,3 +192,28 @@ chore: pin requirements to reproducible versions
 ```
 
 Keep the subject line under 72 characters. Reference issue numbers where applicable (`fix: ... (closes #42)`).
+
+---
+
+## Developer Certificate of Origin
+
+As the [OWASP Project Policy](https://owasp.org/policy/project) requires, contributions are accepted under the [Developer Certificate of Origin (DCO) 1.1](https://developercertificate.org/). By signing off a commit you certify that you wrote the change, or otherwise have the right to submit it under this project's [Apache 2.0 license](LICENSE).
+
+Sign off by adding a `Signed-off-by` line with your real name and the email address you commit with. Git does this for you with `-s`:
+
+```bash
+git commit -s -m "fix: correct container path stripping for custom WORKDIR"
+```
+
+which adds:
+
+```
+Signed-off-by: Jane Doe <jane@example.com>
+```
+
+A CI check (`DCO`) verifies every commit in a pull request. If you forgot, sign off existing commits and force-push your branch:
+
+```bash
+git rebase --signoff main
+git push --force-with-lease
+```

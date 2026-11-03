@@ -13,6 +13,8 @@
   issuing or verifying tokens, instead of silently weakening HS256.
 
 ### Fixed
+- SECURITY.md's email reporting option now gives an address; it pointed to
+  CONTRIBUTING.md, which had none.
 - `pip install vulnreach[server]` now installs PyJWT and bcrypt; previously
   `api/auth.py` failed to import with only the `server` extra.
 
@@ -20,6 +22,8 @@
 - Unused `openai-agents` and `mcp` pins (nothing imports them).
 
 ### Added
+- **DCO sign-off required for contributions** (OWASP Project Policy): documented in
+  CONTRIBUTING.md and checked on every pull request by the `DCO` workflow.
 - `.bestpractices.json` with proposed OpenSSF Best Practices answers.
 - Tests for JWT issue/verify, short and missing secrets, expiry, wrong key and
   `alg=none` (`tests/test_jwt_auth.py`).
