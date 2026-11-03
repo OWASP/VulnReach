@@ -1,0 +1,42 @@
+# Checks that every commit in a pull request is signed off under the
+# Developer Certificate of Origin (see CONTRIBUTING.md).
+
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check Signed-off-by on every commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            email=$(git log -1 --format='%ae' "$sha")
+            if git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" \
+                | grep -qiF "<$email>"; then
+              echo "ok      $(git log -1 --format='%h %s' "$sha")"
+            else
+              echo "::error::$(git log -1 --format='%h' "$sha") has no 'Signed-off-by: ... <$email>' line"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'; to fix existing commits: git rebase --signoff main && git push --force-with-lease"
+            exit 1
+          fi
